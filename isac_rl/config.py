@@ -21,17 +21,19 @@ class SystemConfig:
     angle_grid_max_deg: float = 90.0
     angle_grid_step_deg: float = 0.1
     coarse_grid_step_deg: float = 2.0
-    cross_corr_weight: float = 1.0
     tau_sinr: float = 2.0
     Lr1_ref: float = 1.0
     Lr2_ref: float = 1.0
     Lr_ref: float = 1.0
-    w_bp: float = 1.0
-    w_cc: float = 0.3
+    w_radar: float = 1.0
+    w_cross: float = 1.0
     w_sinr: float = 8.0
-    w_side: float = 0.8
-    w_band: float = 1.0
-    w_balance: float = 0.2
+    center_weight: float = 4.0
+    center_sigma_deg: float = 2.0
+    objective_scale: float = 10.0
+    progress_weight: float = 1.0
+    progress_scale: float = 0.05
+    terminal_weight: float = 0.5
 
     @property
     def angle_grid(self) -> np.ndarray:
@@ -60,15 +62,7 @@ class SystemConfig:
 class EnvConfig:
     episode_steps: int = 8
     action_scale: float = 0.03
-    beta_progress: float = 2.0
-    progress_scale: float = 0.05
-    beta_margin: float = 0.5
-    beta_feasible: float = 0.5
-    terminal_weight: float = 2.0
-    feasible_terminal_bonus: float = 2.0
     ema_reward_decay: float = 0.9
-    reward_objective_scale: float = 10.0
-    reward_clip: float = 10.0
 
 
 @dataclass(frozen=True)

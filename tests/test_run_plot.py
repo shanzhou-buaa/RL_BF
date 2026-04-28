@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import numpy as np
+
 import run_plot
+from isac_rl.plotting import _group_mean_std
 
 
 def test_run_plot_auto_eval_uses_current_eval_without_baselines(tmp_path, monkeypatch):
@@ -38,3 +41,19 @@ def test_run_plot_auto_eval_uses_current_eval_without_baselines(tmp_path, monkey
     assert "--eval-channels" in cmd
     assert "7" in cmd
     assert plotted == [tmp_path]
+
+
+def test_convergence_grouping_uses_episode_when_available():
+    grouped = _group_mean_std(
+        [
+            {"algo": "ppo", "update": "1", "episode": "100", "eval_objective": "3.0"},
+            {"algo": "ppo", "update": "1", "episode": "100", "eval_objective": "5.0"},
+            {"algo": "ppo", "update": "2", "episode": "200", "eval_objective": "1.0"},
+        ],
+        "eval_objective",
+    )
+
+    xs, means, stds = grouped["ppo"]
+    np.testing.assert_allclose(xs, np.asarray([100.0, 200.0]))
+    np.testing.assert_allclose(means, np.asarray([4.0, 1.0]))
+    np.testing.assert_allclose(stds, np.asarray([1.0, 0.0]))

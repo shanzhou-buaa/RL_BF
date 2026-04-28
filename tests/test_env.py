@@ -82,3 +82,14 @@ def test_reward_is_bounded_for_large_objective():
     )
 
     assert -10.0 <= reward <= 10.0
+
+
+def test_reward_depends_on_objective_progress_not_feasible_or_margin():
+    env = ISACBeamformingEnv(SystemConfig(M=3, K=1), EnvConfig(), seed=6)
+    env.reset()
+    env.prev_info = {"objective": 5.0}
+
+    base = {"objective": 4.0, "min_sinr_gap_db": -100.0, "feasible": False}
+    changed = {"objective": 4.0, "min_sinr_gap_db": 100.0, "feasible": True}
+
+    assert env.compute_reward(base, done=False) == env.compute_reward(changed, done=False)

@@ -34,22 +34,30 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _x_value(row: dict[str, str]) -> float:
+    if "episode" in row and row["episode"] not in ("", None):
+        return float(row["episode"])
+    return float(row["update"])
+
+
 def _group_mean_std(rows: list[dict[str, str]], metric: str):
     grouped: dict[tuple[str, float], list[float]] = defaultdict(list)
     for row in rows:
-        grouped[(row["algo"], float(row["update"]))].append(float(row[metric]))
+        if metric not in row or row[metric] in ("", None):
+            continue
+        grouped[(row["algo"], _x_value(row))].append(float(row[metric]))
 
     output = {}
     for algo in sorted({key[0] for key in grouped}):
-        updates = sorted({key[1] for key in grouped if key[0] == algo})
+        xs = sorted({key[1] for key in grouped if key[0] == algo})
         means = []
         stds = []
-        for update in updates:
-            values = np.asarray(grouped[(algo, update)], dtype=np.float64)
+        for x in xs:
+            values = np.asarray(grouped[(algo, x)], dtype=np.float64)
             means.append(float(values.mean()))
             stds.append(float(values.std()))
         output[algo] = (
-            np.asarray(updates, dtype=np.float64),
+            np.asarray(xs, dtype=np.float64),
             np.asarray(means, dtype=np.float64),
             np.asarray(stds, dtype=np.float64),
         )
@@ -67,14 +75,18 @@ def plot_convergence(log_dir: Path) -> None:
         ("eval_reward", "Evaluation reward", "convergence_reward"),
         ("eval_objective", "Evaluation objective J", "convergence_objective"),
         ("eval_Lr", "Radar loss $L_r$", "convergence_radar_loss"),
+        ("eval_C_target", "Target-center error", "convergence_target_center"),
+        ("eval_C_offset", "Target peak-offset error", "convergence_peak_offset"),
     ):
         grouped = _group_mean_std(rows, metric)
+        if not grouped:
+            continue
         plt.figure(figsize=(5.8, 3.4))
         for algo, (updates, mean, std) in grouped.items():
             plt.plot(updates, mean, marker="o", label=algo.upper())
             if np.any(std > 0):
                 plt.fill_between(updates, mean - std, mean + std, alpha=0.18)
-        plt.xlabel("Update")
+        plt.xlabel("Training episode")
         plt.ylabel(ylabel)
         plt.grid(True, alpha=0.3)
         plt.legend()
@@ -119,6 +131,8 @@ def plot_beampattern_npz(log_dir: Path) -> None:
         label = key.replace("pattern_", "").replace("_", "-").upper()
         y = 10.0 * np.log10(np.maximum(data[key] / ref, 1.0e-12))
         plt.plot(angle_grid, y, label=label)
+    for theta in (-40.0, 0.0, 40.0):
+        plt.axvline(theta, color="0.6", linestyle=":", linewidth=1.0)
     plt.xlabel("Angle (degree)")
     plt.ylabel("Normalized beampattern (dB)")
     plt.ylim(-40, 5)
@@ -147,7 +161,7 @@ def plot_entropy_stats(log_dir: Path) -> None:
         plt.plot(updates, mean, linestyle="--", label=f"{algo.upper()} macro")
         if np.any(std > 0):
             plt.fill_between(updates, mean - std, mean + std, alpha=0.08)
-    plt.xlabel("Update")
+    plt.xlabel("Training episode")
     plt.ylabel("Rate")
     plt.grid(True, alpha=0.3)
     plt.legend()

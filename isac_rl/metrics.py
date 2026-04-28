@@ -29,12 +29,28 @@ def desired_beampattern(
     return desired
 
 
+def center_weight_vector(
+    angle_grid: np.ndarray,
+    target_angles_deg: Tuple[float, ...],
+    center_weight: float,
+    center_sigma_deg: float,
+) -> np.ndarray:
+    weights = np.ones_like(angle_grid, dtype=np.float64)
+    sigma = max(float(center_sigma_deg), EPS)
+    for theta in target_angles_deg:
+        weights += float(center_weight) * np.exp(
+            -0.5 * ((angle_grid - float(theta)) / sigma) ** 2
+        )
+    return weights
+
+
 @dataclass(frozen=True)
 class MetricCache:
     angle_grid: np.ndarray
     grid_steering: np.ndarray
     target_steering: np.ndarray
     desired: np.ndarray
+    center_weights: np.ndarray
 
     @classmethod
     def from_config(cls, cfg: SystemConfig) -> "MetricCache":
@@ -49,11 +65,18 @@ class MetricCache:
             cfg.target_angles_deg,
             cfg.beam_width_deg,
         )
+        center_weights = center_weight_vector(
+            angle_grid,
+            cfg.target_angles_deg,
+            cfg.center_weight,
+            cfg.center_sigma_deg,
+        )
         return cls(
             angle_grid=angle_grid,
             grid_steering=grid_steering,
             target_steering=target_steering,
             desired=desired,
+            center_weights=center_weights,
         )
 
 
@@ -84,8 +107,17 @@ def optimal_alpha(pattern: np.ndarray, desired: np.ndarray) -> float:
     return max(0.0, float(np.dot(desired, pattern) / denom))
 
 
-def compute_Lr1(pattern: np.ndarray, desired: np.ndarray, alpha: float) -> float:
-    return float(np.mean((alpha * desired - pattern) ** 2))
+def compute_Lr1(
+    pattern: np.ndarray,
+    desired: np.ndarray,
+    alpha: float,
+    weights: np.ndarray | None = None,
+) -> float:
+    error = (alpha * desired - pattern) ** 2
+    if weights is None:
+        return float(np.mean(error))
+    weights = np.asarray(weights, dtype=np.float64)
+    return float(np.sum(weights * error) / (np.sum(weights) + EPS))
 
 
 def compute_Lr2(R: np.ndarray, target_steering: np.ndarray) -> float:
@@ -139,12 +171,28 @@ def compute_sidelobe_metrics(
     mean_sidelobe_ratio = mean_side / max(target_mean_gain, EPS)
 
     band_errors = []
+    target_center_errors = []
+    peak_offsets_deg = []
+    peak_offset_costs = []
+    peak_angles = []
     half_width = beam_width_deg / 2.0
     alpha_safe = max(alpha, EPS)
     normalized = pattern / alpha_safe
     for theta in target_angles_deg:
         band = np.abs(angle_grid - theta) <= half_width
+        center_idx = int(np.argmin(np.abs(angle_grid - theta)))
         band_errors.append(float(np.mean((normalized[band] - 1.0) ** 2)))
+        target_center_errors.append(float((normalized[center_idx] - 1.0) ** 2))
+
+        band_indices = np.flatnonzero(band)
+        if band_indices.size == 0:
+            band_indices = np.asarray([center_idx], dtype=np.int64)
+        local_peak_idx = band_indices[int(np.argmax(pattern[band_indices]))]
+        peak_angle = float(angle_grid[local_peak_idx])
+        offset_deg = float(peak_angle - theta)
+        peak_angles.append(peak_angle)
+        peak_offsets_deg.append(offset_deg)
+        peak_offset_costs.append(float((offset_deg / max(half_width, EPS)) ** 2))
 
     return {
         "target_gains": target_gains.astype(np.float64),
@@ -154,6 +202,14 @@ def compute_sidelobe_metrics(
         "peak_sidelobe_ratio": float(peak_sidelobe_ratio),
         "mean_sidelobe_ratio": float(mean_sidelobe_ratio),
         "target_band_error": float(np.mean(band_errors) if band_errors else 0.0),
+        "target_center_error": float(
+            np.mean(target_center_errors) if target_center_errors else 0.0
+        ),
+        "target_peak_offset_error": float(
+            np.mean(peak_offset_costs) if peak_offset_costs else 0.0
+        ),
+        "target_peak_offsets_deg": np.asarray(peak_offsets_deg, dtype=np.float64),
+        "target_peak_angles_deg": np.asarray(peak_angles, dtype=np.float64),
     }
 
 
@@ -172,9 +228,10 @@ def compute_all_metrics(
     pattern = compute_beampattern(W, grid_steering)
     alpha = optimal_alpha(pattern, desired)
     R = compute_covariance(W)
-    Lr1 = compute_Lr1(pattern, desired, alpha)
+    Lr1_plain = compute_Lr1(pattern, desired, alpha)
+    Lr1 = compute_Lr1(pattern, desired, alpha, cache.center_weights)
     Lr2 = compute_Lr2(R, target_steering)
-    Lr = float(Lr1 + cfg.cross_corr_weight * Lr2)
+    Lr = float(Lr1 + cfg.w_cross * Lr2)
     sinr = compute_sinr(W, H, cfg.K, cfg.noise_power)
     sinr_db = 10.0 * np.log10(np.maximum(sinr, EPS))
     gap_db = sinr_db - cfg.sinr_threshold_db
@@ -186,18 +243,17 @@ def compute_all_metrics(
     C_side = float(np.log1p(side["peak_sidelobe_ratio"]))
     C_band = float(side["target_band_error"])
     C_balance = float(max(0.0, 1.0 - side["target_min_ratio"]))
+    C_target = float(side["target_center_error"])
+    C_offset = float(side["target_peak_offset_error"])
     objective = float(
-        cfg.w_bp * np.log1p(Lr1 / cfg.Lr1_ref)
-        + cfg.w_cc * np.log1p(Lr2 / cfg.Lr2_ref)
+        cfg.w_radar * np.log1p(Lr / cfg.Lr_ref)
         + cfg.w_sinr * C_sinr
-        + cfg.w_side * C_side
-        + cfg.w_band * C_band
-        + cfg.w_balance * C_balance
     )
     return {
         "objective": objective,
         "Lr": Lr,
         "Lr1": float(Lr1),
+        "Lr1_plain": float(Lr1_plain),
         "Lr2": float(Lr2),
         "alpha": float(alpha),
         "pattern": pattern,
@@ -213,5 +269,7 @@ def compute_all_metrics(
         "C_side": C_side,
         "C_band": C_band,
         "C_balance": C_balance,
+        "C_target": C_target,
+        "C_offset": C_offset,
         **side,
     }

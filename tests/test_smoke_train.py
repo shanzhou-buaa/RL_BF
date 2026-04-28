@@ -37,6 +37,13 @@ def test_smoke_train_writes_expected_logs(tmp_path: Path):
         rows = list(csv.DictReader(handle))
     assert {row["algo"] for row in rows} == {"ppo", "heppo"}
 
+    with (tmp_path / "eval_history.csv").open(newline="", encoding="utf-8") as handle:
+        eval_rows = list(csv.DictReader(handle))
+    assert "episode" in eval_rows[0]
+    assert "eval_C_target" in eval_rows[0]
+    assert "eval_C_offset" in eval_rows[0]
+    assert "eval_target_peak_offset_error" in eval_rows[0]
+
 
 def test_training_core_modules_do_not_import_baselines():
     for path in (

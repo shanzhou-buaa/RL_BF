@@ -212,20 +212,18 @@ violation = softplus((Gamma_db - SINR_db) / tau_sinr)
 雷达标量特征包含：
 
 ```text
-log1p(Lr1 / Lr1_ref)
+log1p(Lr1_cw / Lr1_ref)
 log1p(Lr2 / Lr2_ref)
 log1p(Lr / Lr_ref)
-log1p(peak_sidelobe_ratio)
-log1p(mean_sidelobe_ratio)
-target gain balance features
+log1p(C_sinr)
 ```
 
 其中：
 
 ```text
-Lr1 = beampattern matching error
+Lr1_cw = center-weighted beampattern matching error
 Lr2 = target-direction cross-correlation
-Lr  = Lr1 + cross_corr_weight * Lr2
+Lr  = Lr1_cw + w_cross * Lr2
 ```
 
 ### Coarse Beampattern Feature
@@ -319,27 +317,25 @@ critic 输出 `V(s_t)`，用于 GAE 和 value loss。
 
 ## 奖励函数
 
-训练 reward 与最终评估指标对齐。先构造总目标：
+训练 reward 保持简洁，只围绕 Liu2020 雷达目标、通信 SINR 软约束和少量 progress shaping。主瓣对准不作为额外 reward 项，而是通过 center-weighted beampattern MSE 融入原始 beampattern matching loss。
+
+center-weighted beampattern MSE 为：
 
 ```text
-J =
-  w_bp      * log1p(Lr1 / Lr1_ref)
-  + w_cc   * log1p(Lr2 / Lr2_ref)
-  + w_sinr * C_sinr
-  + w_side * C_side
-  + w_band * C_band
-  + w_balance * C_balance
+Lr1_cw =
+  sum_l q_l |alpha d(theta_l) - P(theta_l)|^2
+  / sum_l q_l
+
+q_l = 1 + center_weight * sum_p exp(
+  -0.5 * ((theta_l - theta_p) / center_sigma_deg)^2
+)
 ```
 
-默认权重：
+默认中心权重：
 
 ```text
-w_bp = 1.0
-w_cc = 0.3
-w_sinr = 8.0
-w_side = 0.8
-w_band = 1.0
-w_balance = 0.2
+center_weight = 4.0
+center_sigma_deg = 2.0
 ```
 
 SINR cost：
@@ -349,53 +345,40 @@ gap_db_k = Gamma_db - SINR_db_k
 C_sinr = mean(softplus(gap_db_k / 2)^2)
 ```
 
-旁瓣 cost：
+训练 objective：
 
 ```text
-C_side = log1p(peak_sidelobe / target_mean_gain)
-```
-
-目标主瓣形状 cost：
-
-```text
-C_band = mean_over_targets(mean((P(theta_band) / alpha - 1)^2))
-```
-
-目标方向均衡 cost：
-
-```text
-C_balance = max(0, 1 - target_min_gain / target_mean_gain)
+Lr = Lr1_cw + w_cross * Lr2
+J = w_radar * log1p(Lr / Lr_ref) + w_sinr * C_sinr
 ```
 
 每步 reward：
 
 ```text
 progress = (J_prev - J_current) / (abs(J_prev) + eps)
-objective_penalty = -tanh(J_current / reward_objective_scale)
 
 reward =
-  objective_penalty
-  + beta_progress * tanh(progress / progress_scale)
-  + beta_margin * tanh(min_sinr_gap_db / 5)
-  + beta_feasible * feasible_flag
+  -tanh(J_current / objective_scale)
+  + progress_weight * tanh(progress / progress_scale)
 ```
 
 终止步额外加入：
 
 ```text
-reward += -0.5 * terminal_weight * tanh(J_current / reward_objective_scale)
-reward += feasible_terminal_bonus * feasible_flag
-reward = clip(reward, -reward_clip, reward_clip)
+reward += -terminal_weight * tanh(J_current / objective_scale)
+reward = clip(reward, -5, 5)
 ```
 
 默认：
 
 ```text
-reward_objective_scale = 10
-reward_clip = 10
+objective_scale = 10
+progress_weight = 1
+progress_scale = 0.05
+terminal_weight = 0.5
 ```
 
-旧版 reward 直接使用 `-J_current`，在 random initialization 下可能出现大负值并放大 PPO 震荡。当前版本把 objective penalty 有界化，让 reward scale 更适合 PPO/HE-PPO 训练。
+`C_side`、`C_band`、`C_balance`、`C_target`、`C_offset` 等仍会记录为诊断指标，但不进入 reward。这样论文主线更清楚：HE-PPO 的收益来自 entropy-aware macro-transition update，而不是复杂 reward engineering。
 
 当前 `compute_gae()` 会让 terminal reward 正确向同一 episode 的前序 step 传播，`done` mask 只阻止跨 episode 泄漏。
 
@@ -601,13 +584,13 @@ CUDA_VISIBLE_DEVICES=0 python run_train.py \
   --target-angles=-40,0,40 \
   --sinr-db 12 \
   --episode-steps 12 \
-  --updates 300 \
-  --episodes-per-update 1024 \
+  --updates 100 \
+  --episodes-per-update 128 \
   --ppo-epochs 4 \
   --minibatch-size 2048 \
   --lr 1e-4 \
   --action-scale 0.02 \
-  --seeds 1,2,3 \
+  --seeds 1 \
   --eval-interval 5 \
   --torch-threads 16 \
   --allow-tf32 \
@@ -687,6 +670,8 @@ figures/
   convergence_reward.pdf/png
   convergence_objective.pdf/png
   convergence_radar_loss.pdf/png
+  convergence_target_center.pdf/png
+  convergence_peak_offset.pdf/png
   beampattern.pdf/png
   entropy_macro_stats.pdf/png
   runtime_bar.pdf/png
@@ -715,12 +700,18 @@ update_time_sec
 
 ```text
 update
+episode
 eval_reward
 eval_objective
 eval_Lr
 eval_Lr1
+eval_Lr1_plain
 eval_Lr2
 eval_C_sinr
+eval_C_target
+eval_C_offset
+eval_target_center_error
+eval_target_peak_offset_error
 eval_min_sinr_db
 eval_feasible_rate
 eval_peak_sidelobe_ratio
@@ -731,6 +722,7 @@ eval_target_band_error
 
 ```text
 update
+episode
 entropy_mean
 entropy_threshold
 high_entropy_rate
@@ -738,6 +730,62 @@ macro_step_rate
 average_macro_length
 num_macro_segments
 ```
+
+## Figures and Expected Observations
+
+训练和评估图保存在：
+
+```text
+log/YYYYMMDD-HHMMSS/figures/
+```
+
+### `convergence_reward.pdf/png`
+
+显示 evaluation reward 随 training episode 的变化。横轴是训练 episode 数，不是 PPO update。它主要用于检查 reward 信号是否稳定改善。
+
+预期：HE-PPO 至少不应明显低于 PPO；如果 reward 不升但 objective 和 radar loss 改善，论文中应以物理指标为主。
+
+### `convergence_objective.pdf/png`
+
+显示 evaluation objective `J` 随 training episode 的变化。`J` 由 center-weighted Liu radar loss 和 soft SINR penalty 构成。
+
+预期：HE-PPO 的 `J` 下降更快或最终更低。若两条曲线都平，优先检查 `action_scale`、学习率和 `eval_feasible_rate`。
+
+### `convergence_radar_loss.pdf/png`
+
+显示 Liu-style radar loss `Lr = Lr1_cw + w_cross Lr2`。它直接反映波束图匹配和目标方向交叉相关。
+
+预期：在通信约束不崩的前提下，HE-PPO 应取得更低 radar loss。
+
+### `convergence_target_center.pdf/png`
+
+显示目标角中心处的归一化 gain error。该指标不参与 reward，只用于诊断主瓣是否真的对准 `-40, 0, 40` 度。
+
+预期：曲线应下降。若它一直很高，说明主瓣虽然可能靠近目标带，但目标角中心增益不足。
+
+### `convergence_peak_offset.pdf/png`
+
+显示每个目标带内局部峰值相对目标角的归一化角度偏移。
+
+预期：曲线应接近 0。若 beampattern 看起来有主瓣但该值高，说明主瓣峰值偏离了预设方向。
+
+### `beampattern.pdf/png`
+
+显示最终归一化波束图。竖向虚线标出 Liu2020 三个目标角 `-40, 0, 40` 度。
+
+预期：HE-PPO 应形成更接近目标角的三个主瓣，并保持可接受旁瓣。若主瓣偏移，先看 `convergence_peak_offset`。
+
+### `entropy_macro_stats.pdf/png`
+
+显示 high-entropy step rate 和 macro-transition rate。
+
+预期：HE-PPO 的 macro-step rate 不应长期接近 0；若接近 0，HE-PPO 退化为 PPO。若过高，credit assignment 可能过粗。
+
+### `runtime_bar.pdf/png`
+
+显示 checkpoint deterministic inference 的平均耗时。
+
+预期：PPO 和 HE-PPO 在线推理时间应同量级；本仓库当前不包含传统优化 baseline，因此该图主要用于比较学习策略之间的推理开销。
 
 ## 结果阅读顺序
 
@@ -748,12 +796,13 @@ num_macro_segments
 ```text
 1. HE-PPO 的 eval_objective 下降是否快于 PPO。
 2. HE-PPO 的最终 eval_Lr / eval_Lr1 是否低于 PPO。
-3. HE-PPO 的 eval_feasible_rate 是否不低于 PPO。
-4. HE-PPO 的 beampattern 是否有更清晰主瓣和更低旁瓣。
-5. HE-PPO 的 runtime 是否与 PPO 同量级。
+3. HE-PPO 的 eval_target_peak_offset_error 是否接近 0。
+4. HE-PPO 的 eval_feasible_rate 是否不低于 PPO。
+5. HE-PPO 的 beampattern 是否有更清晰且对准目标角的主瓣。
+6. HE-PPO 的 runtime 是否与 PPO 同量级。
 ```
 
-收敛图按 `algo + update` 聚合多 seed，画 mean curve 和 std band。波束图使用统一参考功率归一化，不对每条曲线单独归一化到 0 dB。
+收敛图按 `algo + episode` 聚合多 seed，画 mean curve 和 std band。波束图使用统一参考功率归一化，不对每条曲线单独归一化到 0 dB。
 
 ## 测试
 

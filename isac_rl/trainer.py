@@ -115,6 +115,7 @@ def train_algorithms(
                 "algo": algo,
                 "seed": seed,
                 "update": update,
+                "episode": update * ppo_cfg.episodes_per_update,
                 "entropy_mean": update_stats.get("entropy_mean", update_stats["entropy"]),
                 "entropy_threshold": update_stats.get("entropy_threshold", np.nan),
                 "high_entropy_rate": update_stats.get("high_entropy_rate", 1.0),
@@ -129,6 +130,7 @@ def train_algorithms(
                 eval_row = evaluate_agent(
                     agent, sys_cfg, env_cfg, train_cfg, algo, seed, update
                 )
+                eval_row["episode"] = update * ppo_cfg.episodes_per_update
                 append_csv(log_path / "eval_history.csv", [eval_row])
             postfix = {
                 "reward": f"{rollout_stats['reward']:.3g}",
@@ -325,8 +327,17 @@ def evaluate_agent(
         "eval_objective": float(np.mean([m["objective"] for m in metrics])),
         "eval_Lr": float(np.mean([m["Lr"] for m in metrics])),
         "eval_Lr1": float(np.mean([m["Lr1"] for m in metrics])),
+        "eval_Lr1_plain": float(np.mean([m["Lr1_plain"] for m in metrics])),
         "eval_Lr2": float(np.mean([m["Lr2"] for m in metrics])),
         "eval_C_sinr": float(np.mean([m["C_sinr"] for m in metrics])),
+        "eval_C_target": float(np.mean([m["C_target"] for m in metrics])),
+        "eval_C_offset": float(np.mean([m["C_offset"] for m in metrics])),
+        "eval_target_center_error": float(
+            np.mean([m["target_center_error"] for m in metrics])
+        ),
+        "eval_target_peak_offset_error": float(
+            np.mean([m["target_peak_offset_error"] for m in metrics])
+        ),
         "eval_min_sinr_db": float(np.mean([m["min_sinr_db"] for m in metrics])),
         "eval_feasible_rate": float(np.mean([float(m["feasible"]) for m in metrics])),
         "eval_peak_sidelobe_ratio": float(np.mean([m["peak_sidelobe_ratio"] for m in metrics])),

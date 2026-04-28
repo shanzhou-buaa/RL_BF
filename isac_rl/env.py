@@ -112,19 +112,16 @@ class ISACBeamformingEnv:
         previous = float(self.prev_info["objective"])
         current = float(info["objective"])
         progress = (previous - current) / max(abs(previous), EPS)
-        objective_penalty = -np.tanh(current / max(self.cfg.reward_objective_scale, EPS))
         reward = (
-            objective_penalty
-            + self.cfg.beta_progress * np.tanh(progress / self.cfg.progress_scale)
-            + self.cfg.beta_margin * np.tanh(float(info["min_sinr_gap_db"]) / 5.0)
-            + self.cfg.beta_feasible * float(info["feasible"])
+            -np.tanh(current / max(self.sys.objective_scale, EPS))
+            + self.sys.progress_weight
+            * np.tanh(progress / max(self.sys.progress_scale, EPS))
         )
         if done:
-            reward += -0.5 * self.cfg.terminal_weight * np.tanh(
-                current / max(self.cfg.reward_objective_scale, EPS)
+            reward += -self.sys.terminal_weight * np.tanh(
+                current / max(self.sys.objective_scale, EPS)
             )
-            reward += self.cfg.feasible_terminal_bonus * float(info["feasible"])
-        return float(np.clip(reward, -self.cfg.reward_clip, self.cfg.reward_clip))
+        return float(np.clip(reward, -5.0, 5.0))
 
     def build_state_groups(self) -> Dict[str, np.ndarray]:
         assert self.H is not None and self.W is not None and self.current_info is not None
@@ -155,17 +152,12 @@ class ISACBeamformingEnv:
             ]
         )
 
-        target_gains = np.asarray(self.current_info["target_gains"], dtype=np.float64)
-        target_mean = max(float(self.current_info["target_mean_gain"]), EPS)
         radar = np.asarray(
             [
                 np.log1p(float(self.current_info["Lr1"]) / self.sys.Lr1_ref),
                 np.log1p(float(self.current_info["Lr2"]) / self.sys.Lr2_ref),
                 np.log1p(float(self.current_info["Lr"]) / self.sys.Lr_ref),
-                np.log1p(float(self.current_info["peak_sidelobe_ratio"])),
-                np.log1p(float(self.current_info["mean_sidelobe_ratio"])),
-                float(self.current_info["target_min_gain"]) / target_mean,
-                *[float(value / target_mean) for value in target_gains],
+                np.log1p(float(self.current_info["C_sinr"])),
             ],
             dtype=np.float64,
         )
