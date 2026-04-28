@@ -7,6 +7,7 @@ import numpy as np
 from .config import EnvConfig, SystemConfig
 from .metrics import (
     EPS,
+    MetricCache,
     compute_all_metrics,
     compute_beampattern,
     desired_beampattern,
@@ -32,6 +33,7 @@ class ISACBeamformingEnv:
         self.last_objective_delta = 0.0
         self.last_sinr_cost_delta = 0.0
         self.current_info: Dict[str, object] | None = None
+        self.metric_cache = MetricCache.from_config(self.sys)
         self._coarse_steering = steering_matrix(self.sys.M, self.sys.coarse_grid)
         self._coarse_desired = desired_beampattern(
             self.sys.coarse_grid, self.sys.target_angles_deg, self.sys.beam_width_deg
@@ -54,7 +56,12 @@ class ISACBeamformingEnv:
             self.sys.total_power,
         )
         self.t = 0
-        self.current_info = compute_all_metrics(self.W, self.H, self.sys)
+        self.current_info = compute_all_metrics(
+            self.W,
+            self.H,
+            self.sys,
+            self.metric_cache,
+        )
         self.prev_info = dict(self.current_info)
         self.prev_reward = 0.0
         self.ema_reward = 0.0
@@ -77,7 +84,7 @@ class ISACBeamformingEnv:
         delta_W = self.decode_action(action)
         W_next = self.W + self.cfg.action_scale * delta_W
         W_next = per_antenna_power_normalize(W_next, self.sys.total_power)
-        info = compute_all_metrics(W_next, self.H, self.sys)
+        info = compute_all_metrics(W_next, self.H, self.sys, self.metric_cache)
         next_t = self.t + 1
         done = next_t >= self.cfg.episode_steps
         reward = self.compute_reward(info, done)
@@ -105,16 +112,19 @@ class ISACBeamformingEnv:
         previous = float(self.prev_info["objective"])
         current = float(info["objective"])
         progress = (previous - current) / max(abs(previous), EPS)
+        objective_penalty = -np.tanh(current / max(self.cfg.reward_objective_scale, EPS))
         reward = (
-            -current
+            objective_penalty
             + self.cfg.beta_progress * np.tanh(progress / self.cfg.progress_scale)
             + self.cfg.beta_margin * np.tanh(float(info["min_sinr_gap_db"]) / 5.0)
             + self.cfg.beta_feasible * float(info["feasible"])
         )
         if done:
-            reward += -self.cfg.terminal_weight * current
+            reward += -0.5 * self.cfg.terminal_weight * np.tanh(
+                current / max(self.cfg.reward_objective_scale, EPS)
+            )
             reward += self.cfg.feasible_terminal_bonus * float(info["feasible"])
-        return float(reward)
+        return float(np.clip(reward, -self.cfg.reward_clip, self.cfg.reward_clip))
 
     def build_state_groups(self) -> Dict[str, np.ndarray]:
         assert self.H is not None and self.W is not None and self.current_info is not None

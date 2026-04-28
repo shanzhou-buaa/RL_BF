@@ -32,3 +32,22 @@ def test_deterministic_policy_uses_tanh_mean():
     mean, _, _ = policy.forward(states)
 
     torch.testing.assert_close(action, torch.tanh(mean))
+
+
+def test_effective_entropy_depends_on_squashed_mean():
+    policy = TanhGaussianActorCritic(state_dim=1, action_dim=1, hidden_dim=2)
+    with torch.no_grad():
+        policy.shared[0].weight.fill_(1.0)
+        policy.shared[0].bias.zero_()
+        policy.shared[2].weight.fill_(1.0)
+        policy.shared[2].bias.zero_()
+        policy.actor_mean.weight.fill_(4.0)
+        policy.actor_mean.bias.zero_()
+        policy.log_std.fill_(-1.0)
+
+    states = torch.tensor([[0.0], [2.0]], dtype=torch.float32)
+    _, _, _, entropy, _ = policy.act(states, deterministic=True)
+
+    assert entropy.shape == (2,)
+    assert not torch.allclose(entropy[0], entropy[1])
+    assert entropy[1] < entropy[0]

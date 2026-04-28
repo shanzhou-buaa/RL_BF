@@ -102,7 +102,9 @@ class HEPPOAgent(PPOAgent):
                 dtype=torch.float32,
                 device=self.device,
             )
-            ratio = torch.exp(new_log_prob - old_log_prob)
+            macro_len = max(segment.macro_len, 1)
+            log_ratio = (new_log_prob - old_log_prob) / macro_len
+            ratio = torch.exp(log_ratio)
             adv = torch.as_tensor(segment.advantage, dtype=torch.float32, device=self.device)
             clipped = torch.clamp(
                 ratio, 1.0 - self.cfg.clip_ratio, 1.0 + self.cfg.clip_ratio
@@ -111,8 +113,7 @@ class HEPPOAgent(PPOAgent):
             target = torch.as_tensor(segment.ret, dtype=torch.float32, device=self.device)
             value_terms.append((values[0] - target) ** 2)
             entropy_terms.append(entropies.mean() / max(self.action_dim, 1))
-            segment_kl = torch.abs(old_log_prob - new_log_prob) / max(segment.macro_len, 1)
-            kls.append(segment_kl)
+            kls.append(torch.abs(log_ratio))
             clipped_flags.append((torch.abs(ratio - 1.0) > self.cfg.clip_ratio).float())
         return {
             "actor_loss": -torch.stack(policy_terms).mean(),

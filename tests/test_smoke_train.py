@@ -97,3 +97,61 @@ def test_collect_rollout_seed_depends_on_update(monkeypatch):
     collect_rollout(FakeAgent(), sys_cfg, env_cfg, seed=7, update=2, episodes=2, device="cpu")
 
     assert seen_seeds == [7_000_002, 7_000_003, 7_000_004, 7_000_005]
+
+
+def test_collect_rollout_batches_policy_forward_per_step(monkeypatch):
+    batch_sizes = []
+
+    class FakeEnv:
+        state_dim = 1
+        action_dim = 1
+
+        def __init__(self, _sys_cfg, _env_cfg, seed):
+            self.seed = seed
+            self.step_count = 0
+            self.current_info = None
+
+        def reset(self):
+            return np.asarray([self.seed], dtype=np.float32)
+
+        def step(self, _action):
+            self.step_count += 1
+            done = self.step_count >= 3
+            self.current_info = {
+                "objective": float(self.seed + self.step_count),
+                "feasible": done,
+                "min_sinr_db": float(self.step_count),
+            }
+            return np.asarray([self.seed + self.step_count], dtype=np.float32), 1.0, done, self.current_info
+
+    class FakePolicy:
+        def act(self, state_t):
+            batch_sizes.append(int(state_t.shape[0]))
+            batch = state_t.shape[0]
+            zeros = torch.zeros((batch, 1), dtype=torch.float32)
+            scalar = torch.zeros(batch, dtype=torch.float32)
+            return zeros, zeros, scalar, scalar, scalar
+
+        def value(self, state_t):
+            return torch.zeros(state_t.shape[0], dtype=torch.float32)
+
+    class FakeAgent:
+        policy = FakePolicy()
+
+    monkeypatch.setattr("isac_rl.trainer.ISACBeamformingEnv", FakeEnv)
+
+    sys_cfg = SystemConfig(M=3, K=1, angle_grid_step_deg=5.0)
+    env_cfg = EnvConfig(episode_steps=3)
+    batch, stats = collect_rollout(
+        FakeAgent(),
+        sys_cfg,
+        env_cfg,
+        seed=1,
+        update=1,
+        episodes=4,
+        device="cpu",
+    )
+
+    assert batch_sizes == [4, 4, 4]
+    assert batch.states.shape[0] == 12
+    assert stats["reward"] == 3.0

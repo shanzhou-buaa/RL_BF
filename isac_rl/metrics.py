@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, Tuple
 
@@ -26,6 +27,34 @@ def desired_beampattern(
     for theta in target_angles_deg:
         desired[np.abs(angle_grid_deg - theta) <= half_width] = 1.0
     return desired
+
+
+@dataclass(frozen=True)
+class MetricCache:
+    angle_grid: np.ndarray
+    grid_steering: np.ndarray
+    target_steering: np.ndarray
+    desired: np.ndarray
+
+    @classmethod
+    def from_config(cls, cfg: SystemConfig) -> "MetricCache":
+        angle_grid = cfg.angle_grid
+        grid_steering = steering_matrix(cfg.M, angle_grid)
+        target_steering = steering_matrix(
+            cfg.M,
+            np.asarray(cfg.target_angles_deg, dtype=np.float64),
+        )
+        desired = desired_beampattern(
+            angle_grid,
+            cfg.target_angles_deg,
+            cfg.beam_width_deg,
+        )
+        return cls(
+            angle_grid=angle_grid,
+            grid_steering=grid_steering,
+            target_steering=target_steering,
+            desired=desired,
+        )
 
 
 def per_antenna_power_normalize(W: np.ndarray, total_power: float) -> np.ndarray:
@@ -128,13 +157,18 @@ def compute_sidelobe_metrics(
     }
 
 
-def compute_all_metrics(W: np.ndarray, H: np.ndarray, cfg: SystemConfig) -> Dict[str, object]:
-    angle_grid = cfg.angle_grid
-    grid_steering = steering_matrix(cfg.M, angle_grid)
-    target_steering = steering_matrix(
-        cfg.M, np.asarray(cfg.target_angles_deg, dtype=np.float64)
-    )
-    desired = desired_beampattern(angle_grid, cfg.target_angles_deg, cfg.beam_width_deg)
+def compute_all_metrics(
+    W: np.ndarray,
+    H: np.ndarray,
+    cfg: SystemConfig,
+    cache: MetricCache | None = None,
+) -> Dict[str, object]:
+    if cache is None:
+        cache = MetricCache.from_config(cfg)
+    angle_grid = cache.angle_grid
+    grid_steering = cache.grid_steering
+    target_steering = cache.target_steering
+    desired = cache.desired
     pattern = compute_beampattern(W, grid_steering)
     alpha = optimal_alpha(pattern, desired)
     R = compute_covariance(W)

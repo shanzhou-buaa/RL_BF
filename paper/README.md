@@ -27,20 +27,23 @@ pdflatex main
 1. 先在仓库根目录训练 PPO/HE-PPO：
 
 ```bash
-python run_train.py \
+CUDA_VISIBLE_DEVICES=0 python run_train.py \
   --algos ppo,heppo \
   --M 10 \
   --K 2 \
   --target-angles=-40,0,40 \
   --sinr-db 12 \
-  --episode-steps 8 \
+  --episode-steps 12 \
   --updates 300 \
-  --episodes-per-update 256 \
-  --ppo-epochs 5 \
-  --minibatch-size 512 \
-  --lr 3e-4 \
-  --action-scale 0.03 \
+  --episodes-per-update 1024 \
+  --ppo-epochs 4 \
+  --minibatch-size 2048 \
+  --lr 1e-4 \
+  --action-scale 0.02 \
   --seeds 1,2,3 \
+  --eval-interval 5 \
+  --torch-threads 16 \
+  --allow-tf32 \
   --device cuda
 ```
 
@@ -58,7 +61,11 @@ python run_eval.py \
 3. 如需重新绘图：
 
 ```bash
-python run_plot.py --log-dir log/YYYYMMDD-HHMMSS
+python run_plot.py \
+  --log-dir log/YYYYMMDD-HHMMSS \
+  --eval-channels 256 \
+  --plot-seed 2026 \
+  --device cpu
 ```
 
 4. 编译论文。

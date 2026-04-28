@@ -67,6 +67,8 @@ class EnvConfig:
     terminal_weight: float = 2.0
     feasible_terminal_bonus: float = 2.0
     ema_reward_decay: float = 0.9
+    reward_objective_scale: float = 10.0
+    reward_clip: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,7 @@ class PPOConfig:
 @dataclass(frozen=True)
 class TrainConfig:
     algos: Tuple[str, ...] = ("ppo", "heppo")
-    seeds: Tuple[int, ...] = (1)
+    seeds: Tuple[int, ...] = (1,)
     eval_channels: int = 64
     eval_seed: int = 2026
     eval_interval: int = 1

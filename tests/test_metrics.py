@@ -2,6 +2,7 @@ import numpy as np
 
 from isac_rl.config import SystemConfig
 from isac_rl.metrics import (
+    MetricCache,
     compute_all_metrics,
     compute_beampattern,
     compute_sinr,
@@ -58,3 +59,25 @@ def test_metrics_follow_liu_shapes_and_return_objective_terms():
     ):
         assert key in metrics
     assert desired.shape == cfg.angle_grid.shape
+
+
+def test_compute_all_metrics_accepts_cached_fixed_matrices(monkeypatch):
+    cfg = SystemConfig(M=4, K=1, angle_grid_step_deg=5.0)
+    rng = np.random.default_rng(2)
+    H = rng.normal(size=(cfg.K, cfg.M)) + 1j * rng.normal(size=(cfg.K, cfg.M))
+    W = per_antenna_power_normalize(
+        rng.normal(size=(cfg.M, cfg.K + cfg.M))
+        + 1j * rng.normal(size=(cfg.M, cfg.K + cfg.M)),
+        cfg.total_power,
+    )
+    cache = MetricCache.from_config(cfg)
+
+    def fail_steering_matrix(*_args, **_kwargs):
+        raise AssertionError("steering_matrix should not be called when cache is supplied")
+
+    monkeypatch.setattr("isac_rl.metrics.steering_matrix", fail_steering_matrix)
+
+    metrics = compute_all_metrics(W, H, cfg, cache)
+
+    assert metrics["pattern"].shape == cache.angle_grid.shape
+    assert metrics["desired"] is cache.desired

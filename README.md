@@ -99,6 +99,28 @@ isac_rl/heppo.py
 
 仓库内不再保留传统优化对比方法的实现文件。`run_eval.py` 只评估已经训练好的 RL checkpoint。
 
+## 训练加速
+
+当前训练仍是单进程、单 GPU 路线，不在一次实验里同时调用两张 GPU。加速来自三点：
+
+```text
+1. MetricCache 缓存固定 angle grid、steering matrix、target steering 和 desired pattern。
+2. collect_rollout 在一个 update 内同时创建 episodes_per_update 个环境。
+3. 每个 step 把所有 state stack 成 batch，只做一次 policy forward，再用 CPU 线程池并行执行 env.step。
+```
+
+因此 `episodes_per_update` 越大，GPU MLP 前向的 batch 越大；同时 `eval_interval` 控制评估频率，避免每个 update 都跑大量 eval channel。
+
+`run_train.py` 提供单 GPU 加速参数：
+
+```text
+--eval-interval N       每 N 个 update 评估一次
+--torch-threads N       设置 torch CPU 线程数
+--allow-tf32            在支持的 CUDA GPU 上打开 TF32
+```
+
+如果机器有多张 GPU，推荐分别启动独立实验，并用 `CUDA_VISIBLE_DEVICES` 只暴露一张卡给每个进程；本仓库不需要 DataParallel 或跨卡梯度同步。
+
 ## 环境
 
 `ISACBeamformingEnv.reset()` 只做随机初始化：
@@ -277,6 +299,16 @@ log_prob = Normal.log_prob(raw_action).sum()
 log_prob -= log(1 - action^2 + 1e-6).sum()
 ```
 
+HE-PPO 的 step entropy 和 PPO entropy bonus 使用 tanh 后的有效 entropy，而不是 raw Normal entropy：
+
+```text
+effective_entropy =
+  Normal.entropy()
+  + log(1 - tanh(mu)^2 + 1e-6)
+```
+
+这样 entropy 不再只由全局 `log_std` 决定，也会随当前 state 下的 mean action 饱和程度变化。若 `mu` 使 `tanh(mu)` 接近 `-1` 或 `1`，有效 entropy 会下降；若动作均值处于未饱和区域，有效 entropy 更高。
+
 评估时使用 deterministic inference：
 
 ```text
@@ -339,9 +371,10 @@ C_balance = max(0, 1 - target_min_gain / target_mean_gain)
 
 ```text
 progress = (J_prev - J_current) / (abs(J_prev) + eps)
+objective_penalty = -tanh(J_current / reward_objective_scale)
 
 reward =
-  -J_current
+  objective_penalty
   + beta_progress * tanh(progress / progress_scale)
   + beta_margin * tanh(min_sinr_gap_db / 5)
   + beta_feasible * feasible_flag
@@ -350,9 +383,19 @@ reward =
 终止步额外加入：
 
 ```text
-reward += -terminal_weight * J_current
+reward += -0.5 * terminal_weight * tanh(J_current / reward_objective_scale)
 reward += feasible_terminal_bonus * feasible_flag
+reward = clip(reward, -reward_clip, reward_clip)
 ```
+
+默认：
+
+```text
+reward_objective_scale = 10
+reward_clip = 10
+```
+
+旧版 reward 直接使用 `-J_current`，在 random initialization 下可能出现大负值并放大 PPO 震荡。当前版本把 objective penalty 有界化，让 reward scale 更适合 PPO/HE-PPO 训练。
 
 当前 `compute_gae()` 会让 terminal reward 正确向同一 episode 的前序 step 传播，`done` mask 只阻止跨 episode 泄漏。
 
@@ -413,7 +456,7 @@ t, t+1, ..., t+l-1
 macro_indices = [t, t+1, ..., t+l-1]
 macro_old_log_prob = sum(old_log_prob_i)
 macro_new_log_prob = sum(new_log_prob_i)
-ratio_macro = exp(macro_new_log_prob - macro_old_log_prob)
+ratio_macro = exp((macro_new_log_prob - macro_old_log_prob) / macro_len)
 ```
 
 高熵 step 不合并，等价于长度为 1 的普通 PPO transition。
@@ -424,13 +467,13 @@ ratio_macro = exp(macro_new_log_prob - macro_old_log_prob)
 max_macro_len = 3
 ```
 
-macro PPO ratio 仍使用累计 log-prob；日志和 KL early stopping 使用 per-step scale：
+macro PPO ratio 使用平均 log-ratio，把连续低熵片段视为一个 consolidated effective step。KL 也使用相同尺度：
 
 ```text
 approx_kl_macro = abs(macro_old_log_prob - macro_new_log_prob) / macro_len
 ```
 
-这样避免低熵片段因 log-prob 累加而过早触发 KL early stop。
+这样避免低熵片段因 log-prob 累加而更容易被 clip，导致 HE-PPO 更新比 PPO 更保守。
 
 ### Macro Advantage
 
@@ -482,10 +525,10 @@ target_high_entropy_rate = 0.45
 
 ## 训练命令
 
-正式训练：
+快速调试：
 
 ```bash
-python run_train.py \
+CUDA_VISIBLE_DEVICES=1 python run_train.py \
   --algos ppo,heppo \
   --M 10 \
   --K 2 \
@@ -493,12 +536,15 @@ python run_train.py \
   --sinr-db 12 \
   --episode-steps 8 \
   --updates 100 \
-  --episodes-per-update 256 \
-  --ppo-epochs 5 \
-  --minibatch-size 512 \
-  --lr 3e-4 \
-  --action-scale 0.03 \
+  --episodes-per-update 128 \
+  --ppo-epochs 3 \
+  --minibatch-size 256 \
+  --lr 1e-4 \
+  --action-scale 0.02 \
   --seeds 1 \
+  --eval-interval 10 \
+  --torch-threads 16 \
+  --allow-tf32 \
   --device cuda
 ```
 
@@ -545,6 +591,38 @@ python run_train.py \
   --device cpu
 ```
 
+正式训练：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python run_train.py \
+  --algos ppo,heppo \
+  --M 10 \
+  --K 2 \
+  --target-angles=-40,0,40 \
+  --sinr-db 12 \
+  --episode-steps 12 \
+  --updates 300 \
+  --episodes-per-update 1024 \
+  --ppo-epochs 4 \
+  --minibatch-size 2048 \
+  --lr 1e-4 \
+  --action-scale 0.02 \
+  --seeds 1,2,3 \
+  --eval-interval 5 \
+  --torch-threads 16 \
+  --allow-tf32 \
+  --device cuda
+```
+
+如果显存仍然很空，可以再尝试：
+
+```text
+--episodes-per-update 2048
+--minibatch-size 4096
+```
+
+先从 `1024 / 2048` 开始，更容易稳定 PPO/HE-PPO 曲线，也能让单张 GPU 有更大的 batch workload。
+
 ## 评估与绘图
 
 评估训练好的 RL checkpoint：
@@ -569,8 +647,14 @@ python run_eval.py \
 只重新绘图：
 
 ```bash
-python run_plot.py --log-dir log/YYYYMMDD-HHMMSS
+python run_plot.py \
+  --log-dir log/YYYYMMDD-HHMMSS \
+  --eval-channels 256 \
+  --plot-seed 2026 \
+  --device cpu
 ```
+
+`run_plot.py` 会检查 `patterns.npz`。如果不存在，它会自动调用当前无 baseline 的 `run_eval.py` 生成 `beamformers.npz`、`patterns.npz` 和图文件；如果你只想绘制已有文件，可以加 `--no-auto-eval`。
 
 ## 输出文件
 

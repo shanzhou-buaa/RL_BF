@@ -1,7 +1,10 @@
 import numpy as np
+import torch
 
 from isac_rl.buffer import RolloutBatch
-from isac_rl.entropy_macro import EntropyMacroBuilder
+from isac_rl.config import PPOConfig
+from isac_rl.entropy_macro import EntropyMacroBuilder, MacroSegment
+from isac_rl.heppo import HEPPOAgent
 
 
 def test_entropy_macro_builder_groups_consecutive_low_entropy_steps():
@@ -46,3 +49,41 @@ def test_group_normalized_macro_advantage_is_finite():
     corrected = builder.apply_group_correction(segments)
 
     assert all(np.isfinite(segment.advantage) for segment in corrected)
+
+
+def test_heppo_macro_ratio_uses_average_log_ratio():
+    agent = HEPPOAgent(
+        state_dim=1,
+        action_dim=1,
+        cfg=PPOConfig(clip_ratio=0.5, hidden_dim=4),
+        device="cpu",
+    )
+
+    def fake_evaluate_actions(_states, _actions):
+        return (
+            torch.tensor([0.1, 0.1], dtype=torch.float32),
+            torch.zeros(2, dtype=torch.float32),
+            torch.zeros(2, dtype=torch.float32),
+        )
+
+    agent.policy.evaluate_actions = fake_evaluate_actions
+    segment = MacroSegment(
+        indices=[0, 1],
+        old_log_prob=0.0,
+        advantage=1.0,
+        ret=0.0,
+        start_step=0,
+        macro_len=2,
+        entropy=0.0,
+        reward=0.0,
+    )
+
+    loss = agent._segment_loss(
+        states=torch.zeros((2, 1), dtype=torch.float32),
+        actions=torch.zeros((2, 1), dtype=torch.float32),
+        segments=[segment],
+    )
+
+    expected_ratio = torch.exp(torch.tensor(0.1))
+    torch.testing.assert_close(loss["actor_loss"], -expected_ratio)
+    torch.testing.assert_close(loss["approx_kl"], torch.tensor(0.1))

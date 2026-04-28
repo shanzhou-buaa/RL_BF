@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from time import perf_counter
@@ -17,6 +19,11 @@ from .logger import append_csv
 from .metrics import compute_all_metrics
 from .ppo import PPOAgent
 from .utils import save_json, set_global_seed
+
+
+def _step_env(job):
+    env, action = job
+    return env.step(action)
 
 
 def make_agent(algo: str, state_dim: int, action_dim: int, cfg: PPOConfig, device: str):
@@ -165,6 +172,76 @@ def collect_rollout(
     episodes: int,
     device: str,
 ) -> tuple[RolloutBatch, Dict[str, float]]:
+    envs = [
+        ISACBeamformingEnv(
+            sys_cfg,
+            env_cfg,
+            seed=seed * 1_000_000 + update * episodes + ep,
+        )
+        for ep in range(episodes)
+    ]
+    states_np = np.stack([env.reset() for env in envs]).astype(np.float32)
+    storage = [
+        {
+            "states": [],
+            "actions": [],
+            "rewards": [],
+            "dones": [],
+            "values": [],
+            "log_probs": [],
+            "entropies": [],
+            "episode_steps": [],
+            "next_values": [],
+        }
+        for _ in range(episodes)
+    ]
+    workers = min(max(os.cpu_count() or 1, 1), max(episodes, 1))
+    action_dims = [max(env.action_dim, 1) for env in envs]
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for step in range(env_cfg.episode_steps):
+            states_t = torch.as_tensor(states_np, dtype=torch.float32, device=device)
+            action_t, _, log_prob_t, entropy_t, value_t = agent.policy.act(states_t)
+
+            actions_np = action_t.cpu().numpy().astype(np.float32)
+            values_np = value_t.cpu().numpy().astype(np.float32)
+            log_probs_np = log_prob_t.cpu().numpy().astype(np.float32)
+            entropies_np = entropy_t.cpu().numpy().astype(np.float32)
+
+            results = list(pool.map(_step_env, zip(envs, actions_np)))
+            next_states_np = np.stack([result[0] for result in results]).astype(np.float32)
+            dones_np = np.asarray([bool(result[2]) for result in results], dtype=bool)
+
+            if step == env_cfg.episode_steps - 1:
+                next_values_np = np.zeros(episodes, dtype=np.float32)
+            else:
+                next_states_t = torch.as_tensor(
+                    next_states_np,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                next_values_np = (
+                    agent.policy.value(next_states_t).cpu().numpy().astype(np.float32)
+                )
+
+            for env_idx, (_next_state, reward, done, _info) in enumerate(results):
+                storage_item = storage[env_idx]
+                storage_item["states"].append(states_np[env_idx])
+                storage_item["actions"].append(actions_np[env_idx])
+                storage_item["rewards"].append(float(reward))
+                storage_item["dones"].append(bool(done))
+                storage_item["values"].append(float(values_np[env_idx]))
+                storage_item["log_probs"].append(float(log_probs_np[env_idx]))
+                storage_item["entropies"].append(
+                    float(entropies_np[env_idx] / action_dims[env_idx])
+                )
+                storage_item["episode_steps"].append(step)
+                storage_item["next_values"].append(
+                    0.0 if dones_np[env_idx] else float(next_values_np[env_idx])
+                )
+
+            states_np = next_states_np
+
     states = []
     actions = []
     rewards = []
@@ -178,34 +255,21 @@ def collect_rollout(
     final_rewards = []
     final_feasible = []
     final_min_sinr_db = []
-    for ep in range(episodes):
-        env_seed = seed * 1_000_000 + update * episodes + ep
-        env = ISACBeamformingEnv(sys_cfg, env_cfg, seed=env_seed)
-        state = env.reset()
-        total_reward = 0.0
-        for step in range(env_cfg.episode_steps):
-            state_t = torch.as_tensor(state[None, :], dtype=torch.float32, device=device)
-            action_t, _, log_prob_t, entropy_t, value_t = agent.policy.act(state_t)
-            action = action_t.squeeze(0).cpu().numpy().astype(np.float32)
-            next_state, reward, done, info = env.step(action)
-            next_state_t = torch.as_tensor(next_state[None, :], dtype=torch.float32, device=device)
-            next_value = 0.0 if done else float(agent.policy.value(next_state_t).item())
-            states.append(state)
-            actions.append(action)
-            rewards.append(float(reward))
-            dones.append(bool(done))
-            values.append(float(value_t.item()))
-            log_probs.append(float(log_prob_t.item()))
-            entropies.append(float(entropy_t.item() / max(env.action_dim, 1)))
-            episode_steps.append(step)
-            next_values.append(next_value)
-            total_reward += float(reward)
-            state = next_state
-            if done:
-                break
+
+    for env_idx, env in enumerate(envs):
+        item = storage[env_idx]
+        states.extend(item["states"])
+        actions.extend(item["actions"])
+        rewards.extend(item["rewards"])
+        dones.extend(item["dones"])
+        values.extend(item["values"])
+        log_probs.extend(item["log_probs"])
+        entropies.extend(item["entropies"])
+        episode_steps.extend(item["episode_steps"])
+        next_values.extend(item["next_values"])
         assert env.current_info is not None
         final_objectives.append(float(env.current_info["objective"]))
-        final_rewards.append(total_reward)
+        final_rewards.append(float(np.sum(item["rewards"])))
         final_feasible.append(float(env.current_info["feasible"]))
         final_min_sinr_db.append(float(env.current_info["min_sinr_db"]))
     batch = RolloutBatch(
@@ -251,7 +315,8 @@ def evaluate_agent(
             if done:
                 break
         rewards.append(total_reward)
-        metrics.append(compute_all_metrics(env.W, env.H, sys_cfg))
+        assert env.W is not None and env.H is not None
+        metrics.append(compute_all_metrics(env.W, env.H, sys_cfg, env.metric_cache))
     return {
         "algo": algo,
         "seed": seed,

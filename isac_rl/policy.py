@@ -50,19 +50,29 @@ class TanhGaussianActorCritic(nn.Module):
         correction = torch.log(1.0 - action.pow(2) + 1.0e-6).sum(dim=-1)
         return log_prob - correction
 
+    def _effective_squashed_entropy(
+        self,
+        dist: Normal,
+        raw_reference: torch.Tensor,
+    ) -> torch.Tensor:
+        action_reference = torch.tanh(raw_reference)
+        normal_entropy = dist.entropy()
+        squash_correction = torch.log(1.0 - action_reference.pow(2) + 1.0e-6)
+        return (normal_entropy + squash_correction).sum(dim=-1)
+
     def act(self, states: torch.Tensor, deterministic: bool = False):
         dist, value = self.distribution(states)
         raw_action = dist.mean if deterministic else dist.rsample()
         action = torch.tanh(raw_action)
         log_prob = self._squashed_log_prob(dist, raw_action, action)
-        entropy = dist.entropy().sum(dim=-1)
+        entropy = self._effective_squashed_entropy(dist, dist.mean)
         return action, raw_action, log_prob, entropy, value
 
     def evaluate_actions(self, states: torch.Tensor, actions: torch.Tensor):
         dist, value = self.distribution(states)
         raw_action = atanh(actions)
         log_prob = self._squashed_log_prob(dist, raw_action, actions)
-        entropy = dist.entropy().sum(dim=-1)
+        entropy = self._effective_squashed_entropy(dist, dist.mean)
         return log_prob, entropy, value
 
     def value(self, states: torch.Tensor) -> torch.Tensor:

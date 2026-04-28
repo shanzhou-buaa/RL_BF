@@ -65,3 +65,20 @@ def test_state_contains_six_feature_groups():
         "progress",
     }
     assert sum(value.size for value in groups.values()) == env.state_dim
+
+
+def test_reward_is_bounded_for_large_objective():
+    env = ISACBeamformingEnv(SystemConfig(M=3, K=1), EnvConfig(), seed=5)
+    env.reset()
+    env.prev_info = {"objective": 1.0}
+
+    reward = env.compute_reward(
+        {
+            "objective": 10_000.0,
+            "min_sinr_gap_db": -100.0,
+            "feasible": False,
+        },
+        done=True,
+    )
+
+    assert -10.0 <= reward <= 10.0

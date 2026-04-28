@@ -59,7 +59,10 @@ def parse_args(argv: list[str] | None = None):
     parser.add_argument("--seeds", default="1")
     parser.add_argument("--eval-channels", type=int, default=64)
     parser.add_argument("--eval-seed", type=int, default=2026)
+    parser.add_argument("--eval-interval", type=int, default=5)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--torch-threads", type=int, default=0)
+    parser.add_argument("--allow-tf32", action="store_true")
     parser.add_argument("--log-root", default="log")
     parser.add_argument("--log-dir", default="")
     parser.add_argument("--no-progress", action="store_true", help="Disable tqdm progress bars")
@@ -69,6 +72,12 @@ def parse_args(argv: list[str] | None = None):
 
 def main() -> None:
     args = parse_args()
+    if args.torch_threads > 0:
+        torch.set_num_threads(args.torch_threads)
+    if args.allow_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     log_dir = Path(args.log_dir) if args.log_dir else timestamped_log_dir(args.log_root)
     sys_cfg = SystemConfig(
         M=args.M,
@@ -90,6 +99,7 @@ def main() -> None:
         seeds=parse_int_list(args.seeds),
         eval_channels=args.eval_channels,
         eval_seed=args.eval_seed,
+        eval_interval=args.eval_interval,
         device=args.device,
     )
     print(f"log_dir: {log_dir}", flush=True)

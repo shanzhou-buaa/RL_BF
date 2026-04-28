@@ -100,7 +100,7 @@ def rollout_policy_on_seed(
             break
 
     assert env.H is not None and env.W is not None
-    metrics = compute_all_metrics(env.W, env.H, sys_cfg)
+    metrics = compute_all_metrics(env.W, env.H, sys_cfg, env.metric_cache)
     return env.H.copy(), env.W.copy(), metrics, perf_counter() - start
 
 
