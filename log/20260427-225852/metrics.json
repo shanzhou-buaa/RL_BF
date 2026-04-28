@@ -1,0 +1,48 @@
+{
+  "cse": {
+    "radar_loss": 0.5648375734538311,
+    "beam_objective": 0.5648375734538311,
+    "beampattern_loss": 0.44789987685452654,
+    "cross_corr": 0.1169376965993046,
+    "weighted_cross_corr": 0.1169376965993046,
+    "target_mean": 2.261955260551477,
+    "sidelobe_ratio": 0.7642030964300246,
+    "sidelobe_leakage": 0.8429996215584912,
+    "target_min": 2.0491666286255668,
+    "target_min_ratio": 0.905927126129793,
+    "target_band_errors": [
+      0.0056318452704356495,
+      0.018897803995233234,
+      0.008157104427860343
+    ],
+    "target_band_error_mean": 0.010895584564509743,
+    "min_sinr": 71.25754950305009,
+    "min_sinr_db": 18.528308831903793,
+    "feasible": true,
+    "cost": 0.0,
+    "alpha": 2.05052667865247
+  },
+  "vanilla": {
+    "radar_loss": 0.5091555618670477,
+    "beam_objective": 0.5091555618670477,
+    "beampattern_loss": 0.43204112174130405,
+    "cross_corr": 0.07711444012574367,
+    "weighted_cross_corr": 0.07711444012574367,
+    "target_mean": 2.281209565567945,
+    "sidelobe_ratio": 0.7766672641604239,
+    "sidelobe_leakage": 0.8517281394181463,
+    "target_min": 2.1576391968565787,
+    "target_min_ratio": 0.9458312070155636,
+    "target_band_errors": [
+      0.004492360949113672,
+      0.011907677350497517,
+      0.007828262207165973
+    ],
+    "target_band_error_mean": 0.008076100168925722,
+    "min_sinr": 16.481323356808556,
+    "min_sinr_db": 12.169920801453983,
+    "feasible": true,
+    "cost": 0.0,
+    "alpha": 2.0801717241332436
+  }
+}

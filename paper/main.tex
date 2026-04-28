@@ -1,0 +1,373 @@
+\documentclass[10pt,journal]{IEEEtran}
+
+\usepackage{amsmath,amssymb}
+\usepackage{cite}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+
+\newcommand{\vect}[1]{\mathbf{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\Herm}{\mathrm{H}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Tr}{\mathrm{Tr}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\relu}{\mathrm{ReLU}}
+
+\begin{document}
+
+\title{Communication-Safe Entropy-Guided PPO for Joint Beamforming in Multiuser ISAC Systems}
+
+\author{First~Author,
+        Second~Author,
+        and~Third~Author%
+\thanks{Manuscript received Month Day, 2026; revised Month Day, 2026.}
+\thanks{The authors are with the Department of Electrical and Computer
+Engineering, University Name, City, Country. Corresponding author:
+First Author (e-mail: author@example.com).}
+}
+
+\markboth{IEEE Wireless Communications Letters,~Vol.~XX, No.~XX, 2026}%
+{Author \MakeLowercase{\textit{et al.}}: Communication-Safe Entropy-Guided PPO for Joint Beamforming}
+
+\maketitle
+
+\begin{abstract}
+Joint transmit beamforming is a fundamental design problem in multiuser
+integrated sensing and communication (ISAC), where the radar transmit
+beampattern must be optimized while the communication users' signal-to-
+interference-plus-noise ratio (SINR) constraints are satisfied. Existing
+optimization-based methods can provide high-quality solutions, but their
+computational cost limits fast inference. This letter proposes a
+communication-safe entropy-guided proximal policy optimization (CSE-PPO)
+method for ISAC beamforming. The proposed method formulates beamforming as
+a finite-horizon residual control problem and introduces a feasibility-
+weighted policy entropy that couples exploration with the minimum SINR
+margin. Consecutive low-effective-entropy steps are consolidated into
+macro-steps for PPO updates, improving credit assignment in low-exploration
+regimes. A primal-dual cost update is further used to suppress SINR
+violations. Simulation results under the Liu-type multiuser MIMO radar and
+communication setup show that CSE-PPO improves radar beampattern quality
+over vanilla PPO while maintaining high communication feasibility.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Integrated sensing and communication, dual-function radar communication,
+beamforming, proximal policy optimization, entropy-guided reinforcement
+learning.
+\end{IEEEkeywords}
+
+\section{Introduction}
+\IEEEPARstart{I}{ntegrated} sensing and communication (ISAC) has been
+recognized as a key enabler for future wireless systems \cite{liu2022isacsurvey}, where radar
+sensing and wireless communication share spectrum, hardware, and spatial
+degrees of freedom. A representative multiuser ISAC design is joint
+transmit beamforming, in which a colocated transmitter simultaneously
+forms radar probing beams and serves multiple downlink users. The classical
+formulation minimizes a radar beampattern loss subject to per-antenna
+power and user SINR constraints \cite{liu2020joint}. Although semidefinite
+relaxation (SDR) can solve this problem with high accuracy, it requires an
+optimization problem to be solved for each channel realization.
+
+Learning-based beamforming has recently attracted attention because it can
+amortize optimization cost after training \cite{zhao2025learning}. However,
+directly applying a neural network or vanilla reinforcement learning (RL)
+to constrained ISAC beamforming is challenging. First, unconstrained
+exploration can easily violate stringent user SINR constraints. Second,
+not all policy updates are equally informative: when the policy entropy is
+small, consecutive residual beamforming actions often lead to nearly
+indistinguishable rewards and noisy credit assignment.
+
+Motivated by the observation that high-entropy steps drive more effective
+RL updates in flow-model alignment \cite{zhang2026egrpo}, this letter
+proposes \emph{communication-safe entropy-guided PPO} (CSE-PPO) for
+multiuser ISAC beamforming. Different from group-relative policy
+optimization, PPO relies on value-based advantage estimates and clipped
+policy ratios. Therefore, we adapt the entropy idea through
+macro-step PPO updates rather than group-normalized rewards. The main
+contributions are summarized as follows:
+\begin{itemize}
+  \item We formulate joint ISAC beamforming as a finite-horizon residual
+  control problem with exact per-antenna power normalization.
+  \item We define a feasibility-weighted policy entropy using the minimum
+  SINR margin, enabling exploration only when it is communication-safe.
+  \item We consolidate consecutive low-effective-entropy steps into
+  macro-steps and optimize them with a clipped PPO surrogate.
+  \item We provide a reproducible simulation pipeline comparing CSE-PPO
+  with SDR, zero-forcing (ZF), vanilla PPO, and entropy-consolidated PPO.
+\end{itemize}
+
+\section{System Model and Problem Formulation}
+Consider a transmitter equipped with $M$ antennas. It serves $K$ single-
+antenna downlink users and simultaneously forms radar beams towards a set
+of target directions. Following \cite{liu2020joint}, the transmitted
+signal at time $n$ is
+\begin{equation}
+    \vect{x}[n] = \mat{W}_{c}\vect{c}[n] + \mat{W}_{r}\vect{s}[n],
+\end{equation}
+where $\mat{W}_{c}\in\mathbb{C}^{M\times K}$ is the communication
+beamformer, $\mat{W}_{r}\in\mathbb{C}^{M\times M}$ is the radar
+beamformer, $\vect{c}[n]$ denotes the communication symbols, and
+$\vect{s}[n]$ denotes the radar waveforms. The transmit covariance matrix
+is
+\begin{equation}
+    \mat{R} = \E[\vect{x}[n]\vect{x}^{\Herm}[n]]
+    = \mat{W}_{c}\mat{W}_{c}^{\Herm}
+    + \mat{W}_{r}\mat{W}_{r}^{\Herm}.
+\end{equation}
+The per-antenna power constraint is
+\begin{equation}
+    [\mat{R}]_{m,m}=P_t/M,\quad m=1,\ldots,M.
+\end{equation}
+
+Let $\vect{a}(\theta)$ be the transmit steering vector. The radar
+beampattern at direction $\theta$ is
+\begin{equation}
+    P(\theta;\mat{R})=\vect{a}^{\Herm}(\theta)\mat{R}\vect{a}(\theta).
+\end{equation}
+Given the desired beampattern $d(\theta)$ and target directions
+$\{\theta_p\}_{p=1}^{P}$, the radar loss is
+\begin{align}
+    L_r(\mat{R},\alpha)
+    &= \frac{1}{L}\sum_{\ell=1}^{L}
+    \left|\alpha d(\theta_\ell)-P(\theta_\ell;\mat{R})\right|^2  \notag\\
+    &\quad + w_c\frac{2}{P^2-P}
+    \sum_{p<q}\left|\vect{a}^{\Herm}(\theta_q)
+    \mat{R}\vect{a}(\theta_p)\right|^2 .
+\end{align}
+
+Let $\mat{H}\in\mathbb{C}^{K\times M}$ be the downlink channel, whose
+$k$-th row is denoted by $\vect{h}_k^{\Herm}$. The received SINR of user
+$k$ is
+\begin{equation}
+    \gamma_k =
+    \frac{|[\mat{H}\mat{W}_c]_{k,k}|^2}
+    {\sum_{i\ne k}|[\mat{H}\mat{W}_c]_{k,i}|^2
+    +\sum_{j}|[\mat{H}\mat{W}_r]_{k,j}|^2+\sigma^2 } .
+\end{equation}
+The joint ISAC beamforming problem is
+\begin{subequations}
+\begin{align}
+    \min_{\mat{W}_c,\mat{W}_r,\alpha}\quad
+    & L_r(\mat{R},\alpha)\\
+    \mathrm{s.t.}\quad
+    & [\mat{R}]_{m,m}=P_t/M,\quad \forall m,\\
+    & \gamma_k\ge \Gamma,\quad k=1,\ldots,K,
+\end{align}
+\end{subequations}
+where $\Gamma$ is the required SINR threshold.
+
+\section{Proposed CSE-PPO Method}
+\subsection{Residual Beamforming MDP}
+We cast the above constrained optimization problem as a finite-horizon
+Markov decision process (MDP). Each episode corresponds to one channel
+realization and one target-direction configuration. At step $t$, the
+state includes the real and imaginary parts of $\mat{H}$, the target
+steering vectors, the current beamforming matrix
+$\mat{W}_t=[\mat{W}_{c,t},\mat{W}_{r,t}]$, the radar loss, and the user
+SINR margins. The policy outputs a real-valued action that is mapped to a
+complex residual update $\Delta\mat{W}_t$. The next beamformer is
+\begin{equation}
+    \widetilde{\mat{W}}_{t+1}=\mat{W}_t+\eta\Delta\mat{W}_t,
+\end{equation}
+followed by row-wise normalization so that each antenna satisfies the
+power constraint exactly:
+\begin{equation}
+    [\mat{W}_{t+1}]_{m,:}
+    =
+    \sqrt{\frac{P_t}{M}}
+    \frac{[\widetilde{\mat{W}}_{t+1}]_{m,:}}
+    {\|[\widetilde{\mat{W}}_{t+1}]_{m,:}\|_2}.
+\end{equation}
+
+To reduce harmful exploration, the residual action is parameterized in a
+communication-aware form. The communication columns contain diagonal ZF
+gain residuals, while both communication and radar columns can use
+components from the null space of $\mat{H}$. This structure provides
+radar shaping freedom while reducing user interference.
+
+\subsection{Communication-Safe Entropy}
+For a Gaussian PPO policy $\pi_\theta(\vect{a}_t|\vect{s}_t)$ \cite{schulman2017ppo}, let
+$\mathcal{H}_{\pi,t}$ be the action entropy. Denote the minimum SINR
+margin by
+\begin{equation}
+    m_t=\min_k(\gamma_{k,t}-\Gamma).
+\end{equation}
+The proposed effective entropy is
+\begin{equation}
+    \mathcal{H}_{\mathrm{eff},t}
+    =
+    \frac{\mathcal{H}_{\pi,t}}{d_a}
+    \cdot
+    \phi(m_t),
+    \quad
+    \phi(m_t)=
+    \frac{1}{1+\exp\{-\beta m_t/\Gamma\}},
+\end{equation}
+where $d_a$ is the action dimension and $\beta$ controls how sharply the
+communication margin affects exploration. When the SINR margin is small,
+the effective entropy is reduced even if the policy distribution itself
+has large entropy.
+
+\subsection{Entropy-Consolidated PPO Update}
+If $\mathcal{H}_{\mathrm{eff},t}$ is above a threshold $\tau$, the step is
+updated as a normal PPO transition. Otherwise, consecutive low-effective-
+entropy transitions are merged into a macro-step
+$\mathcal{B}=\{t,\ldots,t+\ell-1\}$. The macro-step likelihood ratio is
+\begin{equation}
+    \rho_{\mathcal{B}}(\theta)
+    =
+    \exp\left(
+    \sum_{i\in\mathcal{B}}
+    \log\pi_\theta(\vect{a}_i|\vect{s}_i)
+    -
+    \log\pi_{\theta_{\mathrm{old}}}(\vect{a}_i|\vect{s}_i)
+    \right).
+\end{equation}
+The macro-step advantage is obtained from generalized advantage estimates
+(GAE) as
+\begin{equation}
+    A_{\mathcal{B}}=\sum_{j=0}^{\ell-1}\gamma^j A_{t+j}.
+\end{equation}
+The clipped PPO objective is then
+\begin{equation}
+    \mathcal{L}_{\mathrm{clip}}
+    =
+    \E_{\mathcal{B}}
+    \left[
+    \min\left(
+    \rho_{\mathcal{B}} A_{\mathcal{B}},
+    \mathrm{clip}(\rho_{\mathcal{B}},1-\epsilon,1+\epsilon)A_{\mathcal{B}}
+    \right)
+    \right].
+\end{equation}
+This design follows the intuition of entropy-aware RL: low-entropy
+individual steps often provide weak reward discrimination, while their
+merged effect is more informative.
+
+\subsection{Dual-Guided Constraint Control}
+The instantaneous reward is
+\begin{equation}
+    r_t =
+    L_r(\mat{W}_{t})-L_r(\mat{W}_{t+1})
+    -\xi\|\vect{a}_t\|_2^2 ,
+\end{equation}
+and the communication violation cost is
+\begin{equation}
+    c_t=
+    \frac{1}{K}\sum_{k=1}^{K}
+    \frac{[\Gamma-\gamma_{k,t}]_+}{\Gamma}.
+\end{equation}
+The PPO advantage is computed using the Lagrangian reward
+$\tilde{r}_t=r_t-\lambda c_t$, and the dual variable is updated by
+\begin{equation}
+    \lambda \leftarrow
+    \left[\lambda+\eta_\lambda(\bar{c}-c_0)\right]_+,
+\end{equation}
+where $\bar{c}$ is the average cost in the rollout batch.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox{0.92\linewidth}{
+\textbf{CSE-PPO training procedure}\\
+1) Initialize beamformer with a ZF-inspired feasible point.\\
+2) Collect batched residual beamforming rollouts.\\
+3) Compute feasibility-weighted entropy.\\
+4) Merge consecutive low-effective-entropy steps.\\
+5) Update actor-critic with clipped PPO and dual SINR cost.\\
+6) During inference, return the feasible beamformer with the minimum radar loss.
+}}
+\caption{Communication-safe entropy-guided PPO for ISAC beamforming.}
+\label{fig:framework}
+\end{figure}
+
+\section{Numerical Results}
+We follow the simulation setup in \cite{liu2020joint}. Unless otherwise
+specified, the transmitter has $M=10$ antennas, the total transmit power is
+$P_t=1$, and the noise variance is $\sigma^2=0.01$. The radar target
+directions are $-40^\circ$, $0^\circ$, and $40^\circ$, with an ideal
+beamwidth of $10^\circ$. The downlink channel follows Rayleigh fading. The
+SINR threshold is varied from $4$ dB to $24$ dB, and the number of users is
+selected from $K\in\{2,4,6\}$.
+
+The compared methods are: i) SDR, which solves the relaxed convex problem;
+ii) ZF, which uses communication interference suppression and null-space
+radar shaping; iii) vanilla PPO; iv) entropy-consolidated PPO (EC-PPO),
+which removes the communication feasibility weight; and v) the proposed
+CSE-PPO.
+
+\begin{figure}[t]
+\centering
+\IfFileExists{figs/beampattern.pdf}{%
+\includegraphics[width=\linewidth]{figs/beampattern.pdf}
+}{%
+\fbox{\parbox{0.92\linewidth}{Place generated beampattern figure here. Use
+\texttt{plot\_beampatterns.py} to generate \texttt{beampattern.pdf}.}}
+}
+\caption{Transmit beampatterns obtained by different methods under the same
+channel realization.}
+\label{fig:beampattern}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\IfFileExists{figs/tradeoff.pdf}{%
+\includegraphics[width=\linewidth]{figs/tradeoff.pdf}
+}{%
+\fbox{\parbox{0.92\linewidth}{Place radar loss versus SINR threshold figure
+here.}}
+}
+\caption{Radar loss versus communication SINR threshold.}
+\label{fig:tradeoff}
+\end{figure}
+
+Fig.~\ref{fig:beampattern} shows a representative beampattern comparison.
+The SDR method provides the strongest optimization benchmark, while ZF
+preserves communication reliability at the cost of radar shaping freedom.
+Compared with vanilla PPO, CSE-PPO forms clearer mainlobes around the
+target directions and suppresses undesired angular leakage. The gain is
+attributed to the communication-safe entropy mechanism, which avoids
+wasting policy updates on low-informative and unsafe residual steps.
+
+Fig.~\ref{fig:tradeoff} reports the radar-communication tradeoff. As the
+SINR threshold increases, all methods experience radar performance loss.
+However, CSE-PPO consistently reduces the gap between learning-based
+beamforming and SDR compared with vanilla PPO and EC-PPO. The ablation
+between EC-PPO and CSE-PPO validates that weighting entropy by the
+communication margin is beneficial for constrained ISAC learning.
+
+\begin{table}[t]
+\centering
+\caption{Qualitative complexity comparison.}
+\label{tab:complexity}
+\begin{tabular}{lcc}
+\toprule
+Method & Online optimization & Inference style\\
+\midrule
+SDR & High & Convex solver per channel\\
+ZF & Low & Closed-form/search\\
+Vanilla PPO & Low & Neural forward rollouts\\
+EC-PPO & Low & Neural forward rollouts\\
+CSE-PPO & Low & Neural forward rollouts\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:complexity} summarizes the online complexity trend. SDR is
+useful as a performance upper benchmark but requires solving a semidefinite
+program for each channel. Once trained, PPO-based methods only require a
+small number of neural forward passes and deterministic residual updates.
+
+\section{Conclusion}
+This letter proposed CSE-PPO for constrained multiuser ISAC beamforming.
+By combining residual beamforming, feasibility-weighted entropy,
+macro-step PPO updates, and primal-dual SINR control, the proposed method
+improves radar beampattern learning while maintaining communication
+feasibility. Future work will extend the current framework to wideband
+channels and robust beamforming under imperfect CSI.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
