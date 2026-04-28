@@ -48,7 +48,11 @@ def train_algorithms(
             "train": asdict(train_cfg),
         },
     )
-    summary = {"algorithms": list(train_cfg.algos), "seeds": list(train_cfg.seeds)}
+    summary: dict[str, object] = {
+        "algorithms": list(train_cfg.algos),
+        "seeds": list(train_cfg.seeds),
+        "checkpoints": {},
+    }
     run_jobs = [(algo, seed) for algo in train_cfg.algos for seed in train_cfg.seeds]
     run_iter = tqdm(
         run_jobs,
@@ -72,7 +76,13 @@ def train_algorithms(
         for update in update_iter:
             start = perf_counter()
             batch, rollout_stats = collect_rollout(
-                agent, sys_cfg, env_cfg, seed, ppo_cfg.episodes_per_update, train_cfg.device
+                agent,
+                sys_cfg,
+                env_cfg,
+                seed,
+                update,
+                ppo_cfg.episodes_per_update,
+                train_cfg.device,
             )
             update_stats = agent.update(batch)
             elapsed = perf_counter() - start
@@ -83,6 +93,8 @@ def train_algorithms(
                 "episode": update * ppo_cfg.episodes_per_update,
                 "train_reward": rollout_stats["reward"],
                 "train_objective": rollout_stats["objective"],
+                "train_feasible_rate": rollout_stats["feasible_rate"],
+                "train_min_sinr_db": rollout_stats["min_sinr_db"],
                 "actor_loss": update_stats["actor_loss"],
                 "critic_loss": update_stats["critic_loss"],
                 "entropy": update_stats["entropy"],
@@ -114,14 +126,17 @@ def train_algorithms(
             postfix = {
                 "reward": f"{rollout_stats['reward']:.3g}",
                 "J": f"{rollout_stats['objective']:.3g}",
+                "feas": f"{rollout_stats['feasible_rate']:.2f}",
                 "ent": f"{update_stats['entropy']:.3g}",
                 "macro": f"{update_stats.get('macro_step_rate', 0.0):.2f}",
                 "sec": f"{elapsed:.1f}",
             }
             if eval_row is not None:
                 postfix["evalJ"] = f"{eval_row['eval_objective']:.3g}"
-                postfix["feas"] = f"{eval_row['eval_feasible_rate']:.2f}"
+                postfix["evalFeas"] = f"{eval_row['eval_feasible_rate']:.2f}"
             update_iter.set_postfix(postfix)
+        checkpoint_name = f"{algo}_seed{seed}.pt"
+        checkpoint_path = checkpoint_dir / checkpoint_name
         torch.save(
             {
                 "algo": algo,
@@ -133,8 +148,9 @@ def train_algorithms(
                 "env": asdict(env_cfg),
                 "ppo": asdict(ppo_cfg),
             },
-            checkpoint_dir / f"{algo}.pt",
+            checkpoint_path,
         )
+        summary["checkpoints"][f"{algo}_seed{seed}"] = str(checkpoint_path)
     save_json(log_path / "summary.json", summary)
     return summary
 
@@ -145,6 +161,7 @@ def collect_rollout(
     sys_cfg: SystemConfig,
     env_cfg: EnvConfig,
     seed: int,
+    update: int,
     episodes: int,
     device: str,
 ) -> tuple[RolloutBatch, Dict[str, float]]:
@@ -159,8 +176,11 @@ def collect_rollout(
     next_values = []
     final_objectives = []
     final_rewards = []
+    final_feasible = []
+    final_min_sinr_db = []
     for ep in range(episodes):
-        env = ISACBeamformingEnv(sys_cfg, env_cfg, seed=seed * 100_000 + ep)
+        env_seed = seed * 1_000_000 + update * episodes + ep
+        env = ISACBeamformingEnv(sys_cfg, env_cfg, seed=env_seed)
         state = env.reset()
         total_reward = 0.0
         for step in range(env_cfg.episode_steps):
@@ -183,8 +203,11 @@ def collect_rollout(
             state = next_state
             if done:
                 break
+        assert env.current_info is not None
         final_objectives.append(float(env.current_info["objective"]))
         final_rewards.append(total_reward)
+        final_feasible.append(float(env.current_info["feasible"]))
+        final_min_sinr_db.append(float(env.current_info["min_sinr_db"]))
     batch = RolloutBatch(
         states=np.asarray(states, dtype=np.float32),
         actions=np.asarray(actions, dtype=np.float32),
@@ -199,6 +222,8 @@ def collect_rollout(
     return batch, {
         "reward": float(np.mean(final_rewards)),
         "objective": float(np.mean(final_objectives)),
+        "feasible_rate": float(np.mean(final_feasible)),
+        "min_sinr_db": float(np.mean(final_min_sinr_db)),
     }
 
 

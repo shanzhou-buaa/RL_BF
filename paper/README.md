@@ -22,21 +22,43 @@ pdflatex main
 pdflatex main
 ```
 
-波束图生成流程：
+实验与绘图流程：
 
-1. 先在仓库根目录运行实验，生成波束矩阵：
-
-```bash
-python run_experiment.py --methods zf,sdr,vanilla,ec,cse \
-  --algorithm cse --K 2 --sinr-db 12 \
-  --updates 40 --episodes-per-update 64 --eval-episodes 128
-```
-
-2. 使用日志目录绘制图：
+1. 先在仓库根目录训练 PPO/HE-PPO：
 
 ```bash
-python plot_beampatterns.py --input-dir log/YYYYMMDD-HHMMSS \
-  --output-dir paper/figs
+python run_train.py \
+  --algos ppo,heppo \
+  --M 10 \
+  --K 2 \
+  --target-angles=-40,0,40 \
+  --sinr-db 12 \
+  --episode-steps 8 \
+  --updates 300 \
+  --episodes-per-update 256 \
+  --ppo-epochs 5 \
+  --minibatch-size 512 \
+  --lr 3e-4 \
+  --action-scale 0.03 \
+  --seeds 1,2,3 \
+  --device cuda
 ```
 
-3. 编译论文。
+2. 评估训练好的 RL checkpoints 并保存图数据：
+
+```bash
+python run_eval.py \
+  --log-dir log/YYYYMMDD-HHMMSS \
+  --eval-channels 256 \
+  --plot-seed 2026 \
+  --save-plots \
+  --device cpu
+```
+
+3. 如需重新绘图：
+
+```bash
+python run_plot.py --log-dir log/YYYYMMDD-HHMMSS
+```
+
+4. 编译论文。

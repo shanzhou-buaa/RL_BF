@@ -1,47 +1,62 @@
 # HE-PPO for ISAC Beamforming
 
-本仓库实现 **HE-PPO: High-Entropy-step-aware PPO for ISAC Beamforming**。问题设置固定为 Liu2020 多用户 ISAC/DFRC 联合发射波束成形：逐天线功率约束、`M=10`、目标角 `[-40, 0, 40]` 度、主瓣宽度 `10` 度、`Pt=1`、噪声功率 `0.01`、角度网格 `[-90, 90]` 且步长 `0.1` 度。
+本仓库实现 **HE-PPO: High-Entropy-step-aware PPO for ISAC Beamforming**。当前代码已经收敛为一个纯 RL 训练框架：环境随机初始化信道和波束矩阵，策略只输出 full residual action，训练阶段不使用传统优化初始化、搜索候选、动作拒绝或可行性投影。
 
-核心目标是在 SINR 约束下最小化 Liu2020 雷达损失：
+系统设置固定为 Liu2020 多用户 ISAC/DFRC 联合发射模型：
 
 ```text
-Lr(R, alpha) = Lr1 beampattern matching + wc * Lr2 target cross-correlation
+M = 10
+K = 2
+target angles = [-40, 0, 40] deg
+mainlobe width = 10 deg
+Pt = 1
+noise power = 0.01
+angle grid = [-90, 90] deg, step = 0.1 deg
+per-antenna power: [W W^H]_{m,m} = Pt / M
 ```
 
-本版本将论文主线收敛到一件事：把 Zhang2026 “高熵步骤驱动有效 RL、低熵步骤需要合并以改善 credit assignment” 的思想改造成适用于 actor-critic PPO 的 entropy-aware macro-transition update。
-
-## 方法定位
-
-训练只比较两个 RL 方法：
-
-| 方法 | 初始化 | 动作空间 | PPO update | 用途 |
-| --- | --- | --- | --- | --- |
-| `ppo` | 随机 `W` | full residual action | 所有 transition 独立更新 | 原始 PPO 基线 |
-| `heppo` | 随机 `W` | full residual action | 高熵 step 独立更新，连续低熵 step 合并成 macro-transition | 主方法 |
-
-公平对比要求两者完全一致：
+发射矩阵写作：
 
 ```text
-random initialization
-full residual action
+W = [W_c, W_r] in C^{M x (K+M)}
+```
+
+其中 `W_c` 是通信列，`W_r` 是雷达列。训练目标是在通信 SINR 约束下优化雷达波束图匹配和目标方向交叉相关。
+
+## 方法概览
+
+当前只训练并比较两个方法：
+
+| 方法 | 初始化 | 动作空间 | 更新方式 | 作用 |
+| --- | --- | --- | --- | --- |
+| `ppo` | 随机信道、随机波束矩阵 | full residual action | 每个 transition 独立进入 PPO clipped update | 标准 actor-critic PPO |
+| `heppo` | 与 `ppo` 完全相同 | 与 `ppo` 完全相同 | 高熵 step 独立更新，连续低熵 step 合并为 macro-transition | 本文方法 |
+
+两者公平对比时保持一致：
+
+```text
+same random initialization rule
+same full residual action
 same state
 same reward
 same actor-critic network
 same learning rate
 same batch size
 same PPO epochs
-same evaluation channels
+same fixed evaluation channels
 same deterministic inference
 ```
 
-唯一不同是 PPO update 阶段：
+唯一差异在 PPO update 阶段：
 
 ```text
-PPO:    all transitions are optimized independently.
-HE-PPO: consecutive low-entropy transitions are consolidated into macro-transitions.
-```
+PPO:
+  all transitions are optimized independently.
 
-ZF、SDR 只作为 `run_eval.py` 中的离线 baseline，不进入 RL reset、step、rollout 或 trainer。
+HE-PPO:
+  high-entropy transitions are optimized individually;
+  consecutive low-entropy transitions are consolidated into macro-transitions.
+```
 
 ## 代码结构
 
@@ -60,12 +75,12 @@ isac_rl/
   heppo.py
   entropy_macro.py
   trainer.py
-  baselines.py
   logger.py
   plotting.py
   utils.py
 
 tests/
+  test_buffer.py
   test_metrics.py
   test_env.py
   test_policy.py
@@ -73,7 +88,7 @@ tests/
   test_smoke_train.py
 ```
 
-强制隔离规则：
+训练核心文件只包含纯 RL 逻辑：
 
 ```text
 isac_rl/env.py
@@ -82,11 +97,11 @@ isac_rl/ppo.py
 isac_rl/heppo.py
 ```
 
-这些训练核心模块不 import `isac_rl/baselines.py`。`baselines.py` 只被 `run_eval.py` 调用。
+仓库内不再保留传统优化对比方法的实现文件。`run_eval.py` 只评估已经训练好的 RL checkpoint。
 
 ## 环境
 
-`ISACBeamformingEnv.reset()` 使用纯随机初始化：
+`ISACBeamformingEnv.reset()` 只做随机初始化：
 
 ```text
 H ~ CN(0, 1)
@@ -94,12 +109,11 @@ W ~ random complex matrix
 W <- per_antenna_power_normalize(W, Pt)
 ```
 
-禁止使用：
+环境不做以下操作：
 
 ```text
-ZF initialization
-SDR initialization
 pseudo-inverse initialization
+convex-relaxation initialization
 null-space initialization
 line search
 candidate selection
@@ -117,10 +131,10 @@ W_next = W + action_scale * Delta_W
 W_next = per_antenna_power_normalize(W_next, Pt)
 ```
 
-逐天线功率归一化是物理约束：
+逐天线功率归一化是物理约束，不是启发式搜索。它保证：
 
 ```text
-[W W^H]_{m,m} = Pt / M
+[W_next W_next^H]_{m,m} = Pt / M
 ```
 
 ## 状态空间
@@ -138,29 +152,116 @@ s_t = [
 ]
 ```
 
-主要设计：
+### Channel Feature
 
-- `H` 按自身平均功率归一化，并拼接实部/虚部。
-- `W` 按 `sqrt(Pt/M)` 归一化，并拼接实部/虚部。
-- SINR 特征包含每用户 gap、违约 softplus、最小 gap、平均违约和 feasible flag。
-- 雷达标量特征包含 `Lr1`、`Lr2`、`Lr`、旁瓣比例、目标均衡等。
-- 粗粒度 beampattern 使用 `[-90, 90]` 上每 `2` 度一个采样点的误差。
-- progress feature 记录上一奖励、目标改善、SINR cost 改善、EMA reward 和时间进度。
+信道按自身平均功率归一化：
+
+```text
+H_norm = H / sqrt(mean(abs(H)^2) + eps)
+feature = concat(real(H_norm), imag(H_norm))
+```
+
+维度为 `2KM`。
+
+### Beamformer Feature
+
+当前波束矩阵按逐天线目标幅度归一化：
+
+```text
+W_norm = W / sqrt(Pt / M)
+feature = concat(real(W_norm), imag(W_norm))
+```
+
+维度为 `2M(K+M)`。
+
+### SINR Feature
+
+每个用户的 SINR 计算包含通信信号、用户间干扰、雷达列干扰和噪声。状态中记录：
+
+```text
+gap_db = SINR_db - Gamma_db
+violation = softplus((Gamma_db - SINR_db) / tau_sinr)
+```
+
+并拼接每用户 gap、每用户 violation、最小 gap、平均 violation 和 feasible flag。
+
+### Radar Scalar Feature
+
+雷达标量特征包含：
+
+```text
+log1p(Lr1 / Lr1_ref)
+log1p(Lr2 / Lr2_ref)
+log1p(Lr / Lr_ref)
+log1p(peak_sidelobe_ratio)
+log1p(mean_sidelobe_ratio)
+target gain balance features
+```
+
+其中：
+
+```text
+Lr1 = beampattern matching error
+Lr2 = target-direction cross-correlation
+Lr  = Lr1 + cross_corr_weight * Lr2
+```
+
+### Coarse Beampattern Feature
+
+只给策略几个 scalar 很难学出清晰波束图，因此状态额外加入粗粒度角度网格误差：
+
+```text
+coarse grid = [-90, -88, ..., 90] deg
+P_coarse = beampattern(W, coarse grid)
+d_coarse = desired pattern(coarse grid)
+error = clip(P_coarse / alpha - d_coarse, -5, 5)
+```
+
+### Progress Feature
+
+进度特征包含：
+
+```text
+prev_reward
+objective improvement
+SINR-cost improvement
+EMA reward
+t / T
+(T - t) / T
+```
 
 ## 动作空间
 
-主实验只使用 full residual action：
+主实验使用 full residual action：
 
 ```text
 action_dim = 2 * M * (K + M)
 ```
 
-动作前半部分是实部，后半部分是虚部：
+动作拆成复数 residual：
 
 ```text
+half = M * (K + M)
+A_real = action[:half].reshape(M, K+M)
+A_imag = action[half:].reshape(M, K+M)
 Delta_W = A_real + j A_imag
-Delta_W in C^{M x (K+M)}
 ```
+
+执行：
+
+```text
+W_next = W + action_scale * Delta_W
+W_next = per_antenna_power_normalize(W_next, Pt)
+```
+
+默认：
+
+```text
+action_scale = 0.03
+episode_steps = 8
+```
+
+## 策略网络
 
 actor 使用 tanh Gaussian：
 
@@ -169,22 +270,24 @@ raw_action ~ Normal(mu, std)
 action = tanh(raw_action)
 ```
 
-log-prob 使用 tanh correction：
+训练时 log-prob 使用 tanh correction：
 
 ```text
 log_prob = Normal.log_prob(raw_action).sum()
 log_prob -= log(1 - action^2 + 1e-6).sum()
 ```
 
-deterministic inference 使用：
+评估时使用 deterministic inference：
 
 ```text
 action = tanh(mu)
 ```
 
+critic 输出 `V(s_t)`，用于 GAE 和 value loss。
+
 ## 奖励函数
 
-训练目标与论文指标对齐，先构造总目标：
+训练 reward 与最终评估指标对齐。先构造总目标：
 
 ```text
 J =
@@ -207,6 +310,31 @@ w_band = 1.0
 w_balance = 0.2
 ```
 
+SINR cost：
+
+```text
+gap_db_k = Gamma_db - SINR_db_k
+C_sinr = mean(softplus(gap_db_k / 2)^2)
+```
+
+旁瓣 cost：
+
+```text
+C_side = log1p(peak_sidelobe / target_mean_gain)
+```
+
+目标主瓣形状 cost：
+
+```text
+C_band = mean_over_targets(mean((P(theta_band) / alpha - 1)^2))
+```
+
+目标方向均衡 cost：
+
+```text
+C_balance = max(0, 1 - target_min_gain / target_mean_gain)
+```
+
 每步 reward：
 
 ```text
@@ -226,52 +354,33 @@ reward += -terminal_weight * J_current
 reward += feasible_terminal_bonus * feasible_flag
 ```
 
-## HE-PPO
+当前 `compute_gae()` 会让 terminal reward 正确向同一 episode 的前序 step 传播，`done` mask 只阻止跨 episode 泄漏。
 
-### 基线 PPO 如何训练
+## PPO
 
-`ppo` 使用标准 actor-critic PPO。每个 update 先采集 `episodes_per_update` 条 episode，episode 内逐步执行物理环境：
+`ppo` 使用标准 actor-critic PPO：
 
-```text
-s0 -> a0 -> s1 -> a1 -> ... -> sT
-```
+1. 每个 update 采集 `episodes_per_update` 条完整 episode。
+2. 用 GAE 计算 advantage 和 return。
+3. 对所有 transition 做 advantage normalization。
+4. 使用 PPO clipped surrogate 更新 actor。
+5. 使用 return target 更新 critic。
+6. 使用固定 entropy coefficient 做熵正则。
 
-每个 transition 记录：
-
-```text
-(s_t, a_t, r_t, done_t, log pi_old(a_t|s_t), H_t, V(s_t))
-```
-
-采样结束后用 GAE 计算 advantage：
-
-```text
-delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
-A_t = delta_t + gamma * lambda * A_{t+1}
-```
-
-然后每个 transition 独立进入 PPO clipped surrogate：
+PPO actor loss：
 
 ```text
 ratio_t = exp(log pi_new(a_t|s_t) - log pi_old(a_t|s_t))
 L_actor = -mean(min(ratio_t A_t, clip(ratio_t, 1-eps, 1+eps) A_t))
 ```
 
-critic 用 return target 做 MSE，actor 加固定 entropy bonus。这个基线不判断 step 是否高熵，也不合并 transition。
+## HE-PPO
 
-### HE-PPO 的核心思想
+HE-PPO 保留 PPO 的 actor-critic、GAE、critic loss 和 clipped surrogate。它只改变 update 阶段 transition 的组织方式。
 
-HE-PPO 保留 PPO 的 actor-critic、GAE、value loss 和 clipped surrogate。它只改变 update 阶段的样本组织方式：
+### Step Entropy
 
-```text
-high-entropy step: 保留为普通 PPO transition
-low-entropy run:   连续低熵 transition 合并为一个 macro-transition
-```
-
-直觉是：在 beamforming refinement 后期，策略经常输出很确定的小动作，这类低熵步骤之间差异很小，逐步分配 credit 会产生噪声；高熵步骤更可能代表有效探索，应该保留细粒度更新。HE-PPO 因此让高熵步骤单独主导 policy update，把连续低熵片段统一接收一个 macro credit。
-
-### Step entropy 与阈值
-
-每个 step 记录每维策略熵：
+每个 step 记录每维 entropy：
 
 ```text
 h_t = entropy(policy_t) / action_dim
@@ -290,11 +399,15 @@ high entropy: h_t >= tau_h
 low entropy:  h_t <  tau_h
 ```
 
-这里使用每维 entropy，是为了让 entropy 阈值不随动作维度变化。当前主实验 PPO 和 HE-PPO 都使用 full residual action，因此该归一化也让不同配置的日志更可比。
+### Macro-Transition
 
-### Macro-transition 构造
+连续低熵步骤：
 
-连续低熵步骤构造 macro-transition：
+```text
+t, t+1, ..., t+l-1
+```
+
+合并成一个 macro-transition：
 
 ```text
 macro_indices = [t, t+1, ..., t+l-1]
@@ -303,63 +416,73 @@ macro_new_log_prob = sum(new_log_prob_i)
 ratio_macro = exp(macro_new_log_prob - macro_old_log_prob)
 ```
 
-最大合并长度为 `max_macro_len=3`。长度不设太大，是为了避免把过长片段压成一个 credit 后重新引入模糊 credit assignment。
-
 高熵 step 不合并，等价于长度为 1 的普通 PPO transition。
 
-### Macro advantage
-
-macro advantage 以 GAE 为主，并加入较弱的 group-normalized correction：
+默认最大合并长度：
 
 ```text
-A_macro = 0.8 * normalize(A_gae_macro) + 0.2 * A_group
+max_macro_len = 3
 ```
 
-其中：
+macro PPO ratio 仍使用累计 log-prob；日志和 KL early stopping 使用 per-step scale：
+
+```text
+approx_kl_macro = abs(macro_old_log_prob - macro_new_log_prob) / macro_len
+```
+
+这样避免低熵片段因 log-prob 累加而过早触发 KL early stop。
+
+### Macro Advantage
+
+先计算标准 GAE：
+
+```text
+A_t = GAE(reward_t, value_t, done_t)
+```
+
+对 macro segment：
 
 ```text
 A_gae_macro = sum_j gamma^j * A_{t+j}
 R_macro     = sum_j gamma^j * r_{t+j}
-A_group     = normalized R_macro within same (start_step, macro_len) group
 ```
 
-GAE 仍是主项，因此算法保持 PPO 的 critic-based credit assignment；group correction 只作为弱修正，用来借鉴 E-GRPO 中“同类 consolidated group 内做相对优势归一化”的思想。
+再对相同 `(start_step, macro_len)` 的 group 做弱归一化修正：
 
-### HE-PPO loss
+```text
+A_group = (R_macro - mean(R_macro_group)) / (std(R_macro_group) + eps)
+A_macro = 0.8 * normalize(A_gae_macro) + 0.2 * A_group
+```
 
-HE-PPO loss 保留 PPO clipped surrogate、critic loss 和 entropy bonus：
+GAE 仍是主项，group correction 只用于降低连续低熵 refinement step 的 credit noise。
+
+### HE-PPO Loss
 
 ```text
 loss = actor_loss_macro + value_coef * critic_loss - alpha_he * entropy_active
 ```
 
-`alpha_he` 根据 high-entropy rate 动态调整，并限制在 `[1e-5, 5e-2]`。
-
-动态规则：
+`alpha_he` 根据 high-entropy rate 动态调整：
 
 ```text
 if high_entropy_rate < target_high_entropy_rate:
     alpha_he *= 1.02
 else:
     alpha_he *= 0.98
+
+alpha_he = clip(alpha_he, 1e-5, 5e-2)
 ```
 
-默认 `target_high_entropy_rate=0.45`。当高熵样本过少时，提高 entropy coefficient 鼓励探索；当高熵样本足够时，降低 entropy coefficient 让策略更专注于目标优化。
+默认：
 
-### 与 E-GRPO 的区别
+```text
+alpha_he_init = 1e-3
+target_high_entropy_rate = 0.45
+```
 
-HE-PPO 不是直接照搬 GRPO：
+## 训练命令
 
-- E-GRPO 面向 GRPO-based flow-model alignment；HE-PPO 面向连续动作 beamforming control。
-- E-GRPO 不使用 PPO actor-critic critic；HE-PPO 保留 value function、GAE 和 PPO clipped surrogate。
-- E-GRPO 的 consolidated group 直接用于 group-relative update；HE-PPO 只把 group-normalized advantage 作为弱修正，主 advantage 仍来自 GAE。
-- HE-PPO 不改变环境交互，不跳步，不做传统优化投影。
-
-因此论文中可以表述为：HE-PPO transfers the high-entropy-step-aware credit assignment idea from E-GRPO into an actor-critic PPO framework for ISAC beamforming.
-
-## 训练
-
-推荐主实验命令：
+正式训练：
 
 ```bash
 python run_train.py \
@@ -369,35 +492,40 @@ python run_train.py \
   --target-angles=-40,0,40 \
   --sinr-db 12 \
   --episode-steps 8 \
-  --updates 300 \
+  --updates 100 \
   --episodes-per-update 256 \
   --ppo-epochs 5 \
   --minibatch-size 512 \
   --lr 3e-4 \
   --action-scale 0.03 \
-  --seeds 1,2,3 \
+  --seeds 1 \
   --device cuda
 ```
 
-训练时默认显示 `tqdm` 进度条。外层进度显示当前 `algo/seed`，内层进度显示 update，并实时显示：
+训练默认显示 `tqdm` 进度条。外层显示当前 `algo/seed`，内层显示 update，并实时显示：
 
 ```text
 reward
 J
+feasible rate
 entropy
 macro_step_rate
 eval objective
-feasible rate
+eval feasible rate
 seconds per update
 ```
 
-如果在批处理日志里不想显示进度条，可以加：
+如果在后台任务或日志文件中不想显示进度条：
 
 ```bash
---no-progress
+python run_train.py ... --no-progress
 ```
 
-注意：如果目标角第一个值为负数，推荐写成 `--target-angles=-40,0,40`。新版 `run_train.py` 也兼容 `--target-angles -40,0,40`，但等号写法更不容易被 shell/argparse 误解。
+注意：目标角包含负数时，推荐写成：
+
+```bash
+--target-angles=-40,0,40
+```
 
 快速 smoke run：
 
@@ -413,23 +541,32 @@ python run_train.py \
   --minibatch-size 4 \
   --hidden-dim 16 \
   --seeds 1 \
+  --eval-channels 2 \
   --device cpu
 ```
 
 ## 评估与绘图
 
-训练完成后评估 ZF/SDR 离线 baseline，并保存波束图数据：
+评估训练好的 RL checkpoint：
 
 ```bash
 python run_eval.py \
   --log-dir log/YYYYMMDD-HHMMSS \
-  --baselines zf,sdr \
   --eval-channels 256 \
+  --plot-seed 2026 \
   --save-plots \
   --device cpu
 ```
 
-只绘图：
+`run_eval.py` 会：
+
+1. 读取 `log_dir/checkpoints/*.pt`。
+2. 对每个 checkpoint 在 `plot_seed, plot_seed+1, ...` 的固定信道集合上评估。
+3. 用 deterministic policy inference。
+4. 保存多信道均值/标准差指标到 `metrics.json`。
+5. 用 `plot_seed` 这一条代表性信道保存波束矩阵和波束图。
+
+只重新绘图：
 
 ```bash
 python run_plot.py --log-dir log/YYYYMMDD-HHMMSS
@@ -447,11 +584,15 @@ log/YYYYMMDD-HHMMSS/
   eval_history.csv
   entropy_history.csv
   checkpoints/
-    ppo.pt
-    heppo.pt
+    ppo_seed1.pt
+    ppo_seed2.pt
+    ppo_seed3.pt
+    heppo_seed1.pt
+    heppo_seed2.pt
+    heppo_seed3.pt
 ```
 
-`run_eval.py` 额外保存：
+评估后额外保存：
 
 ```text
 beamformers.npz
@@ -461,6 +602,7 @@ runtime.json
 figures/
   convergence_reward.pdf/png
   convergence_objective.pdf/png
+  convergence_radar_loss.pdf/png
   beampattern.pdf/png
   entropy_macro_stats.pdf/png
   runtime_bar.pdf/png
@@ -473,6 +615,8 @@ update
 episode
 train_reward
 train_objective
+train_feasible_rate
+train_min_sinr_db
 actor_loss
 critic_loss
 entropy
@@ -480,6 +624,7 @@ alpha_entropy
 approx_kl
 clip_fraction
 grad_norm
+update_time_sec
 ```
 
 `eval_history.csv` 主要字段：
@@ -510,6 +655,22 @@ average_macro_length
 num_macro_segments
 ```
 
+## 结果阅读顺序
+
+优先看 `eval_history.csv` 和 `metrics.json`，不要只看训练 reward。
+
+建议判断标准：
+
+```text
+1. HE-PPO 的 eval_objective 下降是否快于 PPO。
+2. HE-PPO 的最终 eval_Lr / eval_Lr1 是否低于 PPO。
+3. HE-PPO 的 eval_feasible_rate 是否不低于 PPO。
+4. HE-PPO 的 beampattern 是否有更清晰主瓣和更低旁瓣。
+5. HE-PPO 的 runtime 是否与 PPO 同量级。
+```
+
+收敛图按 `algo + update` 聚合多 seed，画 mean curve 和 std band。波束图使用统一参考功率归一化，不对每条曲线单独归一化到 0 dB。
+
 ## 测试
 
 ```bash
@@ -522,6 +683,9 @@ python -m pytest -q
 - Liu2020 指标和逐天线功率约束。
 - 随机 reset 和直接 residual action step。
 - tanh Gaussian actor 的 log-prob correction。
+- terminal reward 在 GAE 中正确向前传播。
 - HE-PPO 低熵 macro-transition 合并。
+- rollout seed 随 update 变化，避免每个 update 重复同一批训练环境。
+- 多 seed checkpoint 不互相覆盖。
 - PPO/HE-PPO smoke training 和日志文件。
-- 训练核心模块不 import baseline。
+- 训练核心模块不包含传统优化对比方法实现。

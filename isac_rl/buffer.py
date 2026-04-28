@@ -19,6 +19,13 @@ class RolloutBatch:
 
 
 def compute_gae(batch: RolloutBatch, gamma: float, gae_lambda: float) -> tuple[np.ndarray, np.ndarray]:
+    """Compute GAE over a flattened batch of complete episodes.
+
+    The reversed recursion uses ``done`` as the episode boundary mask. Do not
+    reset ``gae`` again after terminal transitions; doing so prevents the final
+    reward of an episode from propagating to earlier steps in the same episode.
+    """
+
     advantages = np.zeros_like(batch.rewards, dtype=np.float32)
     gae = 0.0
     for idx in reversed(range(batch.rewards.size)):
@@ -30,8 +37,6 @@ def compute_gae(batch: RolloutBatch, gamma: float, gae_lambda: float) -> tuple[n
         )
         gae = delta + gamma * gae_lambda * nonterminal * gae
         advantages[idx] = gae
-        if batch.dones[idx]:
-            gae = 0.0
     returns = advantages + batch.values
     return advantages.astype(np.float32), returns.astype(np.float32)
 

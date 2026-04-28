@@ -3,8 +3,8 @@ from __future__ import annotations
 import csv
 import json
 import os
+from collections import defaultdict
 from pathlib import Path
-from typing import Mapping
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
@@ -34,6 +34,28 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def _group_mean_std(rows: list[dict[str, str]], metric: str):
+    grouped: dict[tuple[str, float], list[float]] = defaultdict(list)
+    for row in rows:
+        grouped[(row["algo"], float(row["update"]))].append(float(row[metric]))
+
+    output = {}
+    for algo in sorted({key[0] for key in grouped}):
+        updates = sorted({key[1] for key in grouped if key[0] == algo})
+        means = []
+        stds = []
+        for update in updates:
+            values = np.asarray(grouped[(algo, update)], dtype=np.float64)
+            means.append(float(values.mean()))
+            stds.append(float(values.std()))
+        output[algo] = (
+            np.asarray(updates, dtype=np.float64),
+            np.asarray(means, dtype=np.float64),
+            np.asarray(stds, dtype=np.float64),
+        )
+    return output
+
+
 def plot_convergence(log_dir: Path) -> None:
     set_ieee_style()
     figures = log_dir / "figures"
@@ -44,13 +66,14 @@ def plot_convergence(log_dir: Path) -> None:
     for metric, ylabel, name in (
         ("eval_reward", "Evaluation reward", "convergence_reward"),
         ("eval_objective", "Evaluation objective J", "convergence_objective"),
+        ("eval_Lr", "Radar loss $L_r$", "convergence_radar_loss"),
     ):
+        grouped = _group_mean_std(rows, metric)
         plt.figure(figsize=(5.8, 3.4))
-        for algo in sorted({row["algo"] for row in rows}):
-            algo_rows = [row for row in rows if row["algo"] == algo]
-            updates = np.asarray([float(row["update"]) for row in algo_rows])
-            values = np.asarray([float(row[metric]) for row in algo_rows])
-            plt.plot(updates, values, marker="o", label=algo.upper())
+        for algo, (updates, mean, std) in grouped.items():
+            plt.plot(updates, mean, marker="o", label=algo.upper())
+            if np.any(std > 0):
+                plt.fill_between(updates, mean - std, mean + std, alpha=0.18)
         plt.xlabel("Update")
         plt.ylabel(ylabel)
         plt.grid(True, alpha=0.3)
@@ -78,8 +101,22 @@ def plot_beampattern_npz(log_dir: Path) -> None:
     figures.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(5.8, 3.4))
     plt.plot(angle_grid, np.where(desired > 0, 0.0, -40.0), "k--", label="Desired")
-    for key in pattern_keys:
-        label = key.replace("pattern_", "").upper()
+    preferred = [
+        key
+        for key in (
+            "pattern_ppo_seed1",
+            "pattern_heppo_seed1",
+            "pattern_ppo_seed2",
+            "pattern_heppo_seed2",
+            "pattern_ppo_seed3",
+            "pattern_heppo_seed3",
+        )
+        if key in pattern_keys
+    ]
+    ordered = preferred + [key for key in pattern_keys if key not in preferred]
+
+    for key in ordered:
+        label = key.replace("pattern_", "").replace("_", "-").upper()
         y = 10.0 * np.log10(np.maximum(data[key] / ref, 1.0e-12))
         plt.plot(angle_grid, y, label=label)
     plt.xlabel("Angle (degree)")
@@ -102,13 +139,14 @@ def plot_entropy_stats(log_dir: Path) -> None:
     figures = log_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
     plt.figure(figsize=(5.8, 3.4))
-    for algo in sorted({row["algo"] for row in rows}):
-        algo_rows = [row for row in rows if row["algo"] == algo]
-        updates = np.asarray([float(row["update"]) for row in algo_rows])
-        macro = np.asarray([float(row["macro_step_rate"]) for row in algo_rows])
-        high = np.asarray([float(row["high_entropy_rate"]) for row in algo_rows])
-        plt.plot(updates, high, label=f"{algo.upper()} high entropy")
-        plt.plot(updates, macro, linestyle="--", label=f"{algo.upper()} macro")
+    for algo, (updates, mean, std) in _group_mean_std(rows, "high_entropy_rate").items():
+        plt.plot(updates, mean, label=f"{algo.upper()} high entropy")
+        if np.any(std > 0):
+            plt.fill_between(updates, mean - std, mean + std, alpha=0.12)
+    for algo, (updates, mean, std) in _group_mean_std(rows, "macro_step_rate").items():
+        plt.plot(updates, mean, linestyle="--", label=f"{algo.upper()} macro")
+        if np.any(std > 0):
+            plt.fill_between(updates, mean - std, mean + std, alpha=0.08)
     plt.xlabel("Update")
     plt.ylabel("Rate")
     plt.grid(True, alpha=0.3)
