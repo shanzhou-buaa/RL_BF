@@ -1,9 +1,0 @@
-{
-  "input_dir": "log/20260427-225852",
-  "output_dir": "log/20260427-225852",
-  "methods": [
-    "cse",
-    "vanilla"
-  ],
-  "scale": "db"
-}
