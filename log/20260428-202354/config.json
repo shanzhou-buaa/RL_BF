@@ -1,0 +1,80 @@
+{
+  "system": {
+    "M": 10,
+    "K": 2,
+    "target_angles_deg": [
+      -40.0,
+      0.0,
+      40.0
+    ],
+    "beam_width_deg": 10.0,
+    "total_power": 1.0,
+    "noise_power": 0.01,
+    "sinr_threshold_db": 12.0,
+    "angle_grid_min_deg": -90.0,
+    "angle_grid_max_deg": 90.0,
+    "angle_grid_step_deg": 0.1,
+    "coarse_grid_step_deg": 2.0,
+    "cross_corr_weight": 1.0,
+    "tau_sinr": 2.0,
+    "Lr1_ref": 1.0,
+    "Lr2_ref": 1.0,
+    "Lr_ref": 1.0,
+    "w_bp": 1.0,
+    "w_cc": 0.3,
+    "w_sinr": 8.0,
+    "w_side": 0.8,
+    "w_band": 1.0,
+    "w_balance": 0.2
+  },
+  "env": {
+    "episode_steps": 8,
+    "action_scale": 0.03,
+    "beta_progress": 2.0,
+    "progress_scale": 0.05,
+    "beta_margin": 0.5,
+    "beta_feasible": 0.5,
+    "terminal_weight": 2.0,
+    "feasible_terminal_bonus": 2.0,
+    "ema_reward_decay": 0.9,
+    "reward_objective_scale": 10.0,
+    "reward_clip": 10.0
+  },
+  "ppo": {
+    "updates": 100,
+    "episodes_per_update": 256,
+    "ppo_epochs": 5,
+    "minibatch_size": 512,
+    "lr": 0.0003,
+    "hidden_dim": 128,
+    "gamma": 0.97,
+    "gae_lambda": 0.95,
+    "clip_ratio": 0.2,
+    "value_coef": 0.5,
+    "entropy_coef": 0.001,
+    "max_grad_norm": 1.0,
+    "target_kl": 0.05,
+    "max_macro_len": 3,
+    "entropy_quantile": 0.4,
+    "entropy_threshold_ema": 0.8,
+    "alpha_he_init": 0.001,
+    "alpha_he_min": 1e-05,
+    "alpha_he_max": 0.05,
+    "target_high_entropy_rate": 0.45
+  },
+  "train": {
+    "algos": [
+      "ppo",
+      "heppo"
+    ],
+    "seeds": [
+      1
+    ],
+    "eval_channels": 64,
+    "eval_seed": 2026,
+    "eval_interval": 1,
+    "device": "cuda",
+    "checkpoint_dir": "checkpoints",
+    "extra": {}
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "algorithms": [
+    "ppo",
+    "heppo"
+  ],
+  "seeds": [
+    1
+  ],
+  "checkpoints": {
+    "ppo_seed1": "log/20260428-215035/checkpoints/ppo_seed1.pt",
+    "heppo_seed1": "log/20260428-215035/checkpoints/heppo_seed1.pt"
+  }
+}
